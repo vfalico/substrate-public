@@ -230,12 +230,12 @@ func TestNativeMicroVMSessionsTools(t *testing.T) {
 				restorationAttempted = true
 				restoreCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				up := kata.DebugConsoleDump(restoreCtx, record.Socket, `systemctl start agentsuite-guardd-guest.service; test "$(systemctl show -p ActiveState --value agentsuite-guardd-guest.service)" = active && echo T807_UNIT_RESTARTED`)
+				up := kata.DebugConsoleDump(restoreCtx, record.Socket, `systemctl start agentsuite-guardd-guest.service; test "$(systemctl show -p ActiveState --value agentsuite-guardd-guest.service)" = active && echo POC_UNIT_RESTARTED`)
 				proof["restart_output"] = up
 				if err := saveFault(); err != nil {
 					return fmt.Errorf("persist restart output: %w", err)
 				}
-				if !strings.Contains(up, "\nT807_UNIT_RESTARTED\r") {
+				if !strings.Contains(up, "\nPOC_UNIT_RESTARTED\r") {
 					proof["restart_activation_error"] = "active-unit marker absent"
 					if err := saveFault(); err != nil {
 						return fmt.Errorf("persist activation error: %w", err)
@@ -264,13 +264,13 @@ func TestNativeMicroVMSessionsTools(t *testing.T) {
 				}
 			}()
 			// systemctl targets this guest's exact unit; stop does not detach BPF.
-			down := kata.DebugConsoleDump(ctx, record.Socket, `preserve=$(systemctl show -p RuntimeDirectoryPreserve --value agentsuite-guardd-guest.service) && printf "RuntimeDirectoryPreserve=%s\n" "$preserve" && test "$preserve" = yes && systemctl stop agentsuite-guardd-guest.service && test "$(systemctl show -p ActiveState --value agentsuite-guardd-guest.service)" = inactive && echo T807_UNIT_STOPPED`)
+			down := kata.DebugConsoleDump(ctx, record.Socket, `preserve=$(systemctl show -p RuntimeDirectoryPreserve --value agentsuite-guardd-guest.service) && printf "RuntimeDirectoryPreserve=%s\n" "$preserve" && test "$preserve" = yes && systemctl stop agentsuite-guardd-guest.service && test "$(systemctl show -p ActiveState --value agentsuite-guardd-guest.service)" = inactive && echo POC_UNIT_STOPPED`)
 			proof["stop_output"] = down
 			if err := saveFault(); err != nil {
 				t.Error("persist stop output", err)
 				return
 			}
-			if !strings.Contains(down, "\nT807_UNIT_STOPPED\r") {
+			if !strings.Contains(down, "\nPOC_UNIT_STOPPED\r") {
 				t.Errorf("guest unit stop unqualified: %s", down)
 				return
 			}
@@ -451,7 +451,7 @@ lock=threading.Lock()
 class Handler(http.server.BaseHTTPRequestHandler):
  def handle(self):
   first=self.request.recv(24,socket.MSG_PEEK)
-  if first.startswith(b'T807RAW'):
+  if first.startswith(b'POCRAW'):
    data=self.request.recv(100)
    with lock:counts['allow' if self.server.server_port==28296 else 'deny']+=1
    print('RAW_NATIVE_RECEIVER',self.server.server_port,repr(data),flush=True,file=sys.stderr)
@@ -482,7 +482,7 @@ for port in ([28292,28293,28296] if os.environ.get('EXECUTION_NATIVE_RAW_TCP')==
  s=LiteralServer(('169.254.17.1',port),Handler);servers.append(s);threading.Thread(target=s.serve_forever,daemon=True).start()
 if os.environ.get('EXECUTION_NATIVE_RAW_TCP')=='1':
  for port in [28296,28293]:
-  c=socket.create_connection(('169.254.17.1',port),2);c.sendall(b'T807RAW');reply=c.recv(100);c.close()
+  c=socket.create_connection(('169.254.17.1',port),2);c.sendall(b'POCRAW');reply=c.recv(100);c.close()
   if reply!=b'tool-native-ok\n':raise RuntimeError('raw control failed')
   print('RAW_UNRESTRICTED_CONTROL_ACK',port,flush=True,file=sys.stderr)
  with lock:counts['allow']=0;counts['deny']=0
