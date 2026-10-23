@@ -470,3 +470,19 @@ type ListResponse[T any] struct {
 func (r ListResponse[T]) HasNextPage() bool {
 	return r.NextPageToken != ""
 }
+
+// ActorCreateOperations is an optional generic persistence extension. The
+// operation and original suspended Actor response commit atomically. A replay
+// never recreates a deleted Actor, adopts another UID, resumes or activates.
+// A changed request hash/target returns ErrFailedPrecondition. Operation records
+// are bound to the original atespace UID and survive Actor deletion.
+type ActorCreateOperations interface {
+	// Atomic cancel-or-original: nil response means no compute ever committed
+	// and the operation can never create it later. Not a compute-stop operation.
+	RetireActorCreateOperation(context.Context, string, string, string, []byte) (*ateapipb.Actor, error)
+	// Lookup returns only original cleanup/create response, never live authority.
+	// ErrNotFound means the operation has not committed; a different namespace
+	// generation or changed target/input returns ErrFailedPrecondition.
+	LookupActorCreateOperation(context.Context, string, string, string, []byte) (*ateapipb.Actor, error)
+	CreateActorOperation(context.Context, *ateapipb.Actor, string, []byte) (*ateapipb.Actor, error)
+}

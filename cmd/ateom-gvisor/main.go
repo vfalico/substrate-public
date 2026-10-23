@@ -545,6 +545,7 @@ func validateActorDirs(actorDirs *ateompb.ActorDirs) error {
 }
 
 func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
+ if len(req.GetSpec().GetExecutionRequirement()) != 0 { return nil, fmt.Errorf("mandatory execution requirement needs isolated microvm boundary") }
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -856,6 +857,7 @@ func isContainerAlreadyGone(ctx context.Context, rcmd containerRuntime, name str
 }
 
 func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (resp *ateompb.RestoreWorkloadResponse, retErr error) {
+ if len(req.GetSpec().GetExecutionRequirement()) != 0 { return nil, fmt.Errorf("mandatory execution requirement needs isolated microvm boundary") }
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}

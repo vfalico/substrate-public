@@ -406,6 +406,12 @@ message Actor {
   //
   // +k8s:optional
   ActorStatus status = 7;
+  // Mandatory opaque whole-execution input, frozen at Actor creation.
+  // Unset retains policy-free behavior. No backend locator is admitted here.
+  // +k8s:optional
+  // +k8s:immutable
+  bytes execution_requirement = 8;
+
 }
 
 // EgressPolicy is an egress policy resource nested under an Actor. An Actor has
@@ -1056,6 +1062,12 @@ message SandboxConfig {
 // resumes by starting the containers afresh from the OCI image, with the
 // durable-dir volumes populated from the snapshot.
 message SnapshotConfig {
+  // cold_start_only disables automatic golden snapshot preparation. Actors
+  // start from their immutable template without executable snapshot reuse.
+  // Explicit snapshot/restore operations retain their backend capability gates.
+  // +k8s:optional
+  bool cold_start_only = 5;
+
   // on_commit defines the scope of every snapshot taken of an actor, both
   // the node-local one captured on pause and the one uploaded on suspend.
   // Defaults to FULL when unset.
@@ -1541,6 +1553,24 @@ message CreateActorRequest {
   //
   // +k8s:required
   Actor actor = 1;
+  // Optional host-authored UUID, durably recorded by the caller before RPC.
+  // Replaying this operation with identical normalized input returns the
+  // ORIGINAL suspended-create response, even after Actor deletion. It never
+  // creates a replacement, resumes compute or proves current enforcement.
+  // A changed input refuses. Operation records survive target deletion.
+  // +k8s:optional
+  // +k8s:maxLength=36
+  string operation_id = 2;
+  // Lookup/recovery only: return the original response or NOT_FOUND; never
+  // create compute. Requires operation_id. Not part of the create input hash.
+  // +k8s:optional
+  bool lookup_only = 3;
+  // Cleanup-only atomic cancel-or-original. A committed operation returns its
+  // original response. Otherwise installs a permanent cancellation tombstone
+  // and returns an empty Actor (no UID). A delayed Create then cannot commit.
+  // Mutually exclusive with lookup_only; requires operation_id.
+  // +k8s:optional
+  bool retire_operation = 4;
 }
 
 // Request to update mutable fields on an existing Actor.
@@ -1583,6 +1613,11 @@ message ResumeActorRequest {
   // +k8s:required
   // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
+  // Optional immutable incarnation precondition. Checked before the running
+  // fast path and again under the Actor lease before any resume side effect.
+  // Empty preserves ordinary name-based resume for existing callers.
+  // +k8s:optional
+  string actor_uid = 2;
 }
 
 message ResumeActorResponse {

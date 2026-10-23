@@ -190,6 +190,8 @@ func (r *ActorTemplateReconciler) reconcileOne(ctx context.Context, ref resource
 		return 0, err
 	}
 
+	if tmpl.GetSnapshotConfig().GetColdStartOnly() { return 0,nil }
+
 	goldenActorRef := &ateapipb.ObjectRef{
 		// Golden actors live in the reserved ate-golden atespace, because
 		// the suspend workflow relies on the ate-golden system atespace to

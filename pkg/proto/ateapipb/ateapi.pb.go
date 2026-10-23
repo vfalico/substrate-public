@@ -893,9 +893,14 @@ type Actor struct {
 	// server and ignored on input. It is always present in output.
 	//
 	// +k8s:optional
-	Status        *ActorStatus `protobuf:"bytes,7,opt,name=status,proto3" json:"status,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Status *ActorStatus `protobuf:"bytes,7,opt,name=status,proto3" json:"status,omitempty"`
+	// Mandatory opaque whole-execution input, frozen at Actor creation.
+	// Unset retains policy-free behavior. No backend locator is admitted here.
+	// +k8s:optional
+	// +k8s:immutable
+	ExecutionRequirement []byte `protobuf:"bytes,8,opt,name=execution_requirement,json=executionRequirement,proto3" json:"execution_requirement,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *Actor) Reset() {
@@ -959,6 +964,13 @@ func (x *Actor) GetSourceTag() *ObjectRef {
 func (x *Actor) GetStatus() *ActorStatus {
 	if x != nil {
 		return x.Status
+	}
+	return nil
+}
+
+func (x *Actor) GetExecutionRequirement() []byte {
+	if x != nil {
+		return x.ExecutionRequirement
 	}
 	return nil
 }
@@ -2778,6 +2790,11 @@ func (x *SandboxConfig) GetConfigName() string {
 // durable-dir volumes populated from the snapshot.
 type SnapshotConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// cold_start_only disables automatic golden snapshot preparation. Actors
+	// start from their immutable template without executable snapshot reuse.
+	// Explicit snapshot/restore operations retain their backend capability gates.
+	// +k8s:optional
+	ColdStartOnly bool `protobuf:"varint,5,opt,name=cold_start_only,json=coldStartOnly,proto3" json:"cold_start_only,omitempty"`
 	// on_commit defines the scope of every snapshot taken of an actor, both
 	// the node-local one captured on pause and the one uploaded on suspend.
 	// Defaults to FULL when unset.
@@ -2825,6 +2842,13 @@ func (x *SnapshotConfig) ProtoReflect() protoreflect.Message {
 // Deprecated: Use SnapshotConfig.ProtoReflect.Descriptor instead.
 func (*SnapshotConfig) Descriptor() ([]byte, []int) {
 	return file_ateapi_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *SnapshotConfig) GetColdStartOnly() bool {
+	if x != nil {
+		return x.ColdStartOnly
+	}
+	return false
 }
 
 func (x *SnapshotConfig) GetOnCommit() SnapshotContentScope {
@@ -4538,9 +4562,27 @@ type CreateActorRequest struct {
 	// The actor to create.
 	//
 	// +k8s:required
-	Actor         *Actor `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Actor *Actor `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
+	// Optional host-authored UUID, durably recorded by the caller before RPC.
+	// Replaying this operation with identical normalized input returns the
+	// ORIGINAL suspended-create response, even after Actor deletion. It never
+	// creates a replacement, resumes compute or proves current enforcement.
+	// A changed input refuses. Operation records survive target deletion.
+	// +k8s:optional
+	// +k8s:maxLength=36
+	OperationId string `protobuf:"bytes,2,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	// Lookup/recovery only: return the original response or NOT_FOUND; never
+	// create compute. Requires operation_id. Not part of the create input hash.
+	// +k8s:optional
+	LookupOnly bool `protobuf:"varint,3,opt,name=lookup_only,json=lookupOnly,proto3" json:"lookup_only,omitempty"`
+	// Cleanup-only atomic cancel-or-original. A committed operation returns its
+	// original response. Otherwise installs a permanent cancellation tombstone
+	// and returns an empty Actor (no UID). A delayed Create then cannot commit.
+	// Mutually exclusive with lookup_only; requires operation_id.
+	// +k8s:optional
+	RetireOperation bool `protobuf:"varint,4,opt,name=retire_operation,json=retireOperation,proto3" json:"retire_operation,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CreateActorRequest) Reset() {
@@ -4578,6 +4620,27 @@ func (x *CreateActorRequest) GetActor() *Actor {
 		return x.Actor
 	}
 	return nil
+}
+
+func (x *CreateActorRequest) GetOperationId() string {
+	if x != nil {
+		return x.OperationId
+	}
+	return ""
+}
+
+func (x *CreateActorRequest) GetLookupOnly() bool {
+	if x != nil {
+		return x.LookupOnly
+	}
+	return false
+}
+
+func (x *CreateActorRequest) GetRetireOperation() bool {
+	if x != nil {
+		return x.RetireOperation
+	}
+	return false
 }
 
 // Request to update mutable fields on an existing Actor.
@@ -4820,7 +4883,12 @@ type ResumeActorRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// +k8s:required
 	// +k8s:subfield(atespace)=+k8s:required
-	Actor         *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
+	Actor *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
+	// Optional immutable incarnation precondition. Checked before the running
+	// fast path and again under the Actor lease before any resume side effect.
+	// Empty preserves ordinary name-based resume for existing callers.
+	// +k8s:optional
+	ActorUid      string `protobuf:"bytes,2,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4860,6 +4928,13 @@ func (x *ResumeActorRequest) GetActor() *ObjectRef {
 		return x.Actor
 	}
 	return nil
+}
+
+func (x *ResumeActorRequest) GetActorUid() string {
+	if x != nil {
+		return x.ActorUid
+	}
+	return ""
 }
 
 type ResumeActorResponse struct {
@@ -8061,14 +8136,15 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSTATUS_PENDING\x10\x01\x12\x12\n" +
 	"\x0eSTATUS_CREATED\x10\x02\x12\x13\n" +
-	"\x0fSTATUS_DELETING\x10\x03\"\x91\x02\n" +
+	"\x0fSTATUS_DELETING\x10\x03\"\xc6\x02\n" +
 	"\x05Actor\x124\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x128\n" +
 	"\x0eactor_template\x18\x04 \x01(\v2\x11.ateapi.ObjectRefR\ractorTemplate\x129\n" +
 	"\x0fworker_selector\x18\x05 \x01(\v2\x10.ateapi.SelectorR\x0eworkerSelector\x120\n" +
 	"\n" +
 	"source_tag\x18\x06 \x01(\v2\x11.ateapi.ObjectRefR\tsourceTag\x12+\n" +
-	"\x06status\x18\a \x01(\v2\x13.ateapi.ActorStatusR\x06status\"n\n" +
+	"\x06status\x18\a \x01(\v2\x13.ateapi.ActorStatusR\x06status\x123\n" +
+	"\x15execution_requirement\x18\b \x01(\fR\x14executionRequirement\"n\n" +
 	"\fEgressPolicy\x124\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x12(\n" +
 	"\x05rules\x18\x02 \x03(\v2\x12.ateapi.EgressRuleR\x05rules\"\xa0\x01\n" +
@@ -8170,8 +8246,9 @@ const file_ateapi_proto_rawDesc = "" +
 	"\rSandboxConfig\x129\n" +
 	"\rsandbox_class\x18\x01 \x01(\x0e2\x14.ateapi.SandboxClassR\fsandboxClass\x12\x1f\n" +
 	"\vconfig_name\x18\x02 \x01(\tR\n" +
-	"configName\"v\n" +
-	"\x0eSnapshotConfig\x129\n" +
+	"configName\"\x9e\x01\n" +
+	"\x0eSnapshotConfig\x12&\n" +
+	"\x0fcold_start_only\x18\x05 \x01(\bR\rcoldStartOnly\x129\n" +
 	"\ton_commit\x18\x02 \x01(\x0e2\x1c.ateapi.SnapshotContentScopeR\bonCommit\x12)\n" +
 	"\x10storage_location\x18\x04 \x01(\tR\x0fstorageLocation\"\xf5\x02\n" +
 	"\tContainer\x12\x12\n" +
@@ -8259,9 +8336,13 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x0eactor_template\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\ractorTemplate\x12/\n" +
 	"\aoptions\x18\x02 \x01(\v2\x15.ateapi.DeleteOptionsR\aoptions\":\n" +
 	"\x0fGetActorRequest\x12'\n" +
-	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\"9\n" +
+	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\"\xa8\x01\n" +
 	"\x12CreateActorRequest\x12#\n" +
-	"\x05actor\x18\x01 \x01(\v2\r.ateapi.ActorR\x05actor\"9\n" +
+	"\x05actor\x18\x01 \x01(\v2\r.ateapi.ActorR\x05actor\x12!\n" +
+	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12\x1f\n" +
+	"\vlookup_only\x18\x03 \x01(\bR\n" +
+	"lookupOnly\x12)\n" +
+	"\x10retire_operation\x18\x04 \x01(\bR\x0fretireOperation\"9\n" +
 	"\x12UpdateActorRequest\x12#\n" +
 	"\x05actor\x18\x01 \x01(\v2\r.ateapi.ActorR\x05actor\">\n" +
 	"\x13SuspendActorRequest\x12'\n" +
@@ -8271,9 +8352,10 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x11PauseActorRequest\x12'\n" +
 	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\"9\n" +
 	"\x12PauseActorResponse\x12#\n" +
-	"\x05actor\x18\x01 \x01(\v2\r.ateapi.ActorR\x05actor\"=\n" +
+	"\x05actor\x18\x01 \x01(\v2\r.ateapi.ActorR\x05actor\"Z\n" +
 	"\x12ResumeActorRequest\x12'\n" +
-	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\"T\n" +
+	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\x12\x1b\n" +
+	"\tactor_uid\x18\x02 \x01(\tR\bactorUid\"T\n" +
 	"\x13ResumeActorResponse\x12#\n" +
 	"\x05actor\x18\x01 \x01(\v2\r.ateapi.ActorR\x05actor\x12\x18\n" +
 	"\aresumed\x18\x02 \x01(\bR\aresumed\"=\n" +

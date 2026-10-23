@@ -404,6 +404,11 @@ func TestReconcileOne(t *testing.T) {
 		wantSuspends int
 	}{
 		{
+			name:     "cold-start-only template does not create or run golden compute",
+			template: testTemplate(func(t *ateapipb.ActorTemplate) { t.SnapshotConfig = &ateapipb.SnapshotConfig{ColdStartOnly: true} }),
+			control:  &fakeGoldenControl{},
+		},
+		{
 			name:         "happy path creates, resumes, and snapshots the golden actor",
 			template:     testTemplate(),
 			control:      &fakeGoldenControl{snapshot: goldenSnapshot},

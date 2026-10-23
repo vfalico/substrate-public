@@ -39,7 +39,7 @@ import (
 // a few seconds to bind; HTTPClient below is a var so tests can substitute
 // a transport that targets a test server's loopback address.
 const (
-	RequestTimeout   = 250 * time.Millisecond
+	RequestTimeout   = 10 * time.Second
 	PollInterval     = 1 * time.Millisecond
 	maxIdleConnsHost = 1
 )

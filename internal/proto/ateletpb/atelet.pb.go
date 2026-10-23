@@ -1238,11 +1238,13 @@ func (x *SandboxAssets) GetPauseImage() string {
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.
 type WorkloadSpec struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Containers    []*Container           `protobuf:"bytes,1,rep,name=containers,proto3" json:"containers,omitempty"`
-	Volumes       []*Volume              `protobuf:"bytes,2,rep,name=volumes,proto3" json:"volumes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Containers []*Container           `protobuf:"bytes,1,rep,name=containers,proto3" json:"containers,omitempty"`
+	Volumes    []*Volume              `protobuf:"bytes,2,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	// Complete opaque Actor execution requirement; never interpreted by routing.
+	ExecutionRequirement []byte `protobuf:"bytes,3,opt,name=execution_requirement,json=executionRequirement,proto3" json:"execution_requirement,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *WorkloadSpec) Reset() {
@@ -1285,6 +1287,13 @@ func (x *WorkloadSpec) GetContainers() []*Container {
 func (x *WorkloadSpec) GetVolumes() []*Volume {
 	if x != nil {
 		return x.Volumes
+	}
+	return nil
+}
+
+func (x *WorkloadSpec) GetExecutionRequirement() []byte {
+	if x != nil {
+		return x.ExecutionRequirement
 	}
 	return nil
 }
@@ -3158,12 +3167,13 @@ const file_atelet_proto_rawDesc = "" +
 	"pauseImage\x1aM\n" +
 	"\vAssetsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12(\n" +
-	"\x05value\x18\x02 \x01(\v2\x12.atelet.ArchAssetsR\x05value:\x028\x01\"k\n" +
+	"\x05value\x18\x02 \x01(\v2\x12.atelet.ArchAssetsR\x05value:\x028\x01\"\xa0\x01\n" +
 	"\fWorkloadSpec\x121\n" +
 	"\n" +
 	"containers\x18\x01 \x03(\v2\x11.atelet.ContainerR\n" +
 	"containers\x12(\n" +
-	"\avolumes\x18\x02 \x03(\v2\x0e.atelet.VolumeR\avolumes\"\x12\n" +
+	"\avolumes\x18\x02 \x03(\v2\x0e.atelet.VolumeR\avolumes\x123\n" +
+	"\x15execution_requirement\x18\x03 \x01(\fR\x14executionRequirement\"\x12\n" +
 	"\x10DurableDirVolume\"\x9b\x03\n" +
 	"\x14ExternalVolumeSource\x12*\n" +
 	"\x11storage_volume_id\x18\x01 \x01(\tR\x0fstorageVolumeId\x12\x1f\n" +

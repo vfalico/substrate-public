@@ -59,7 +59,11 @@ func NewRequestMetadata(headers []*corev3.HeaderValue, attributes map[string]*st
 			val = string(h.RawValue)
 		}
 
-		headersMap[k] = val
+		if old, ok := headersMap[k]; ok {
+			headersMap[k] = old + "," + val
+		} else {
+			headersMap[k] = val
+		}
 		if k == ":path" {
 			path = val
 		}

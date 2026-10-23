@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/apierror"
-	"github.com/agent-substrate/substrate/internal/ateomstats"
 
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 
@@ -100,6 +99,15 @@ func newReseedNonce() ([]byte, error) {
 // Contract with atelet: the snapshot's files are in ActorDirs.restore_dir,
 // and the durable-dir volume directories re-created (empty).
 func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (resp *ateompb.RestoreWorkloadResponse, retErr error) {
+	// An omitted incoming requirement cannot erase a retained governed binding.
+	// Resolve durable ownership before networking, snapshots or guest execution.
+	if err := s.refuseGovernedReuse(req.GetActorUid()); err != nil {
+		return nil, err
+	}
+	if err := s.checkExecutionConfig(req.GetSpec().GetExecutionRequirement()); err != nil {
+		return nil, err
+	}
+
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -110,6 +118,12 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, fmt.Errorf("gave up waiting for the actor's lock: %w", ctx.Err())
 	}
 	defer s.locks.Unlock(req.GetActorUid())
+	// The preflight above is only an early refusal. Recheck durable authority
+	// under the same Actor lock as launch/checkpoint: another RPC could have
+	// committed a governed journal while this request waited for admission.
+	if err := s.refuseGovernedReuse(req.GetActorUid()); err != nil {
+		return nil, err
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -120,20 +134,17 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 	defer release()
 
-	if err := s.tunnel.Deactivate(ctx, ateomstats.ActorAttributionFromRequest(req)); err != nil {
-		return nil, err
-	}
-
 	p := actorBootParams{
-		actorRef:         resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()},
-		actorUID:         req.GetActorUid(),
-		actorDirs:        req.GetActorDirs(),
-		templateAtespace: req.GetActorTemplateAtespace(),
-		templateName:     req.GetActorTemplateName(),
-		containers:       req.GetSpec().GetContainers(),
-		assetPaths:       req.GetRuntimeAssetPaths(),
-		egressGateway:    req.GetEgressGateway(),
-		size:             sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
+		actorRef:             resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()},
+		actorUID:             req.GetActorUid(),
+		actorDirs:            req.GetActorDirs(),
+		templateAtespace:     req.GetActorTemplateAtespace(),
+		templateName:         req.GetActorTemplateName(),
+		containers:           req.GetSpec().GetContainers(),
+		executionRequirement: append([]byte(nil), req.GetSpec().GetExecutionRequirement()...),
+		assetPaths:           req.GetRuntimeAssetPaths(),
+		egressGateway:        req.GetEgressGateway(),
+		size:                 sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
 	}
 	restoreDir := p.actorDirs.GetRestoreDir()
 	durableDir := p.actorDirs.GetDurableDirVolumeMountsDir()
@@ -145,6 +156,14 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	if err := s.endPreviousActivation(ctx, attribution.UID, req.GetActorDirs()); err != nil {
 		return nil, err
 	}
+	// No namespace teardown can precede runtime stop and exact retirement.
+	if err := s.retireExecution(ctx, attribution.UID); err != nil {
+		return nil, fmt.Errorf("prior execution binding needs exact cleanup: %w", err)
+	}
+	if err := s.tunnel.Deactivate(ctx, attribution); err != nil {
+		return nil, err
+	}
+
 	// Publish attribution before restore, so a stats read during it is
 	// attributed. A Data scope cold-boots, so its CPU counts from zero; the other
 	// scopes resume the guest's counters, so theirs counts from the first
@@ -213,6 +232,9 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, scope ateompb.SnapshotScope, restoreDir string, preserveRestoreDir bool, tStart time.Time) (retErr error) {
 	actorUID := p.actorUID
 
+	if err := requireSnapshotFilesystemState(restoreDir); err != nil {
+		return fmt.Errorf("refuse incomplete filesystem restore: %w", err)
+	}
 	rr := s.resolveRuntime(p.assetPaths)
 	egress, err := s.tunnel.PrepareEgress(ctx, p.attribution(), p.egressGateway)
 	if err != nil {
@@ -310,8 +332,13 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 		if retErr != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			if cleanupErr := s.tunnel.Deactivate(cleanupCtx, p.attribution()); cleanupErr != nil {
-				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Restore failure", slog.Any("err", cleanupErr))
+
+			// Governed target handles remain owned until the caller's unhostActor has
+			// independently established empty compute and retired the exact binding.
+			if len(p.executionRequirement) == 0 {
+				if cleanupErr := s.tunnel.Deactivate(cleanupCtx, p.attribution()); cleanupErr != nil {
+					slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Restore failure", slog.Any("err", cleanupErr))
+				}
 			}
 			// Detach any bundle rootfs overlays mounted by buildActorContainers
 			// before the failure, mirroring teardownActor's cleanup.
@@ -323,6 +350,12 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	netDevs, err := ch.SnapshotNetDevices(restoreDir)
 	if err != nil {
 		return fmt.Errorf("while reading snapshot net devices: %w", err)
+	}
+
+	// The supported boundary is one whole guest on one runtime-owned tap. Extra
+	// snapshot interfaces are not silently protected by a partial binding.
+	if len(p.executionRequirement) != 0 && len(netDevs) != 1 {
+		return fmt.Errorf("mandatory execution requirement needs exactly one restored guest network interface, got %d", len(netDevs))
 	}
 	var restoredNets []ch.RestoredNet
 	var tapFiles []*os.File
@@ -348,7 +381,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	// /dev/vda (image) + each /dev/vd{b+i} (actor rootfs) from the snapshot config paths.
 	apiSocket := filepath.Join(kata.VMDir(actorUID), "clh-api-restore.sock")
 	tTap := time.Now()
-	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
+	chCmd, client, err := s.launchActorVMM(ctx, actorUID, ch.LaunchVMMOptions{
 		Binary: rr.chBinary, APISocket: apiSocket, Stdout: slogWriter{ctx}, Stderr: slogWriter{ctx},
 		SysProcAttr: leaf.SysProcAttr(),
 	})
@@ -378,7 +411,27 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, memMode); err != nil {
 		return fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
+
 	tVMRestore := time.Now()
+	if len(p.executionRequirement) != 0 {
+		state, err := client.State(ctx)
+		if err != nil {
+			return fmt.Errorf("while independently reading restored VM state: %w", err)
+		}
+		if state != "Paused" {
+			return fmt.Errorf("mandatory execution restore requires paused vCPUs, observed %q", state)
+		}
+	}
+
+	// RestoreWithNetFDs leaves vCPUs paused. Bind/read back the complete immutable
+	// requirement against this fresh cgroup, namespace and tap before releasing
+	// any frozen workload instruction or inherited guest socket.
+	if err := s.activateExecution(ctx, p.actorUID, p.executionRequirement, "tap0_kata"); err != nil {
+		return fmt.Errorf("restored paused guest execution provider activation/readback failed: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := client.Resume(ctx); err != nil {
 		return fmt.Errorf("while resuming restored guest: %w", err)
 	}
@@ -477,7 +530,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 		s.startActorLogForwarding(guestAC, attribution, c.GetName(), c.GetName())
 	}
 
-	if err := s.tunnel.Activate(p.attribution(), s.sandboxDialer(p.actorUID), egress); err != nil {
+	if err := s.tunnel.ActivateChecked(p.attribution(), s.sandboxDialer(p.actorUID), egress, func(ctx context.Context) error { return s.lookupExecution(ctx, p.actorUID) }); err != nil {
 		return err
 	}
 	s.setRunningVM(actorUID, ra)

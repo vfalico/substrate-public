@@ -93,7 +93,8 @@ type activation struct {
 	wg     sync.WaitGroup
 
 	// Connects through the actor's namespace.
-	dial DialFunc
+	dial  DialFunc
+	check func(context.Context) error
 	// Connection pools must not be shared across activations.
 	proxy *httputil.ReverseProxy
 }
@@ -183,6 +184,7 @@ func newActorProxy(upstream *url.URL, dial DialFunc) *httputil.ReverseProxy {
 			port := pr.In.Header.Get(TargetPortHeader)
 			pr.Out.Header.Del(TargetPortHeader)
 			pr.Out.Header.Del(atenet.TargetActorHeader)
+			pr.Out.Header.Del(atenet.TargetActorUIDHeader)
 			if p, ok := ParsePort(port); ok {
 				pr.Out.URL.Host = net.JoinHostPort(upstream.Hostname(), strconv.Itoa(p))
 			}
@@ -325,6 +327,12 @@ func (s *Server) ServeConnectHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if active.check != nil {
+		if err := active.check(ctx); err != nil {
+			http.Error(w, "execution authority unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	}
 
 	_, port, err := net.SplitHostPort(r.Host)
 	if err != nil {
@@ -430,6 +438,13 @@ func (w flushingWriter) Write(p []byte) (int, error) {
 // Requests are routed by name, so an older incarnation still active under the
 // same name is replaced.
 func (s *Server) Activate(atespace, actorName, actorUID string, dial DialFunc) error {
+	return s.ActivateChecked(atespace, actorName, actorUID, dial, nil)
+}
+
+// ActivateChecked binds request admission to this exact activation, including
+// HTTP/2 and keepalive requests which need no new sandbox connection.
+func (s *Server) ActivateChecked(atespace, actorName, actorUID string, dial DialFunc, check func(context.Context) error) error {
+
 	if !resources.IsValidResourceName(atespace) || !resources.IsValidResourceName(actorName) {
 		return fmt.Errorf("atunnel: invalid actor reference %q/%q", atespace, actorName)
 	}
@@ -455,6 +470,7 @@ func (s *Server) Activate(atespace, actorName, actorUID string, dial DialFunc) e
 		ctx:    ctx,
 		cancel: cancel,
 		dial:   dial,
+		check:  check,
 		proxy:  s.newProxy(dial),
 	}
 	return nil
@@ -527,6 +543,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if active.check != nil {
+		if err := active.check(requestCtx); err != nil {
+			http.Error(w, "execution authority unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	}
 
 	active.proxy.ServeHTTP(w, r.WithContext(requestCtx))
 }
@@ -542,6 +564,14 @@ func (s *Server) authorize(r *http.Request) (*activation, context.Context, func(
 	if !ok {
 		s.mu.Unlock()
 		return nil, nil, nil, false
+	}
+	// Check under the activation lock, before acquiring a request or dialing.
+	// The ingress router also checks, but replacement can race that check.
+	if values, present := r.Header[http.CanonicalHeaderKey(atenet.TargetActorUIDHeader)]; present {
+		if len(values) != 1 || values[0] == "" || values[0] != active.uid {
+			s.mu.Unlock()
+			return nil, nil, nil, false
+		}
 	}
 	active.wg.Add(1)
 	s.mu.Unlock()

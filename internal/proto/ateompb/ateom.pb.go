@@ -633,10 +633,12 @@ func (x *EgressGateway) GetAddress() string {
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.
 type WorkloadSpec struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Containers    []*Container           `protobuf:"bytes,1,rep,name=containers,proto3" json:"containers,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Containers []*Container           `protobuf:"bytes,1,rep,name=containers,proto3" json:"containers,omitempty"`
+	// Complete opaque Actor execution requirement; never interpreted by routing.
+	ExecutionRequirement []byte `protobuf:"bytes,3,opt,name=execution_requirement,json=executionRequirement,proto3" json:"execution_requirement,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *WorkloadSpec) Reset() {
@@ -672,6 +674,13 @@ func (*WorkloadSpec) Descriptor() ([]byte, []int) {
 func (x *WorkloadSpec) GetContainers() []*Container {
 	if x != nil {
 		return x.Containers
+	}
+	return nil
+}
+
+func (x *WorkloadSpec) GetExecutionRequirement() []byte {
+	if x != nil {
+		return x.ExecutionRequirement
 	}
 	return nil
 }
@@ -1938,11 +1947,12 @@ const file_ateom_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
 	"\x0f_egress_gateway\")\n" +
 	"\rEgressGateway\x12\x18\n" +
-	"\aaddress\x18\x01 \x01(\tR\aaddress\"@\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\"u\n" +
 	"\fWorkloadSpec\x120\n" +
 	"\n" +
 	"containers\x18\x01 \x03(\v2\x10.ateom.ContainerR\n" +
-	"containers\"\x91\x03\n" +
+	"containers\x123\n" +
+	"\x15execution_requirement\x18\x03 \x01(\fR\x14executionRequirement\"\x91\x03\n" +
 	"\tContainer\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x125\n" +
 	"\fwakeup_probe\x18\x02 \x01(\v2\x12.ateom.WakeupProbeR\vwakeupProbe\x12W\n" +

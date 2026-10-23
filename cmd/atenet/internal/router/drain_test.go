@@ -380,3 +380,41 @@ func TestDrainMarkerLifecycle(t *testing.T) {
 		t.Fatalf("stale marker not removed: %v", err)
 	}
 }
+
+// The default drainer must also reach IPv4-only admin when localhost is not
+// dual-stack in the host resolver. No /etc/hosts changes are required.
+func TestEnvoyDrainerReachesIPv4OnlyAdmin(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakeEnvoyAdmin{activeSeries: []int{0}}
+	srv := httptest.NewUnstartedServer(admin.handler())
+	srv.Listener.Close()
+	srv.Listener = ln
+	srv.Start()
+	defer srv.Close()
+	d := newEnvoyDrainer(net.JoinHostPort("localhost", itoa(ln.Addr().(*net.TCPAddr).Port)))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := d.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	admin.mu.Lock()
+	defer admin.mu.Unlock()
+	if len(admin.posts) != 2 {
+		t.Fatalf("admin POSTs=%v", admin.posts)
+	}
+}
+func TestEnvoyAdminDialHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	conn, err := dialEnvoyAdmin(ctx, "tcp", "localhost:1")
+	if conn != nil {
+		conn.Close()
+		t.Fatal("cancelled dial returned connection")
+	}
+	if err == nil {
+		t.Fatal("cancelled dial succeeded")
+	}
+}

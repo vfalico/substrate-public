@@ -382,12 +382,11 @@ func TestSessionCloseWaitsForServingToStop(t *testing.T) {
 }
 
 // A caller that cannot wait forever gets its deadline back as an error, and
-// the namespaces are still removed -- leaving them would wedge the next
-// activation of this actor.
+// exact namespace handles remain owned until serving stops; retry completes
+// cleanup rather than permitting a new activation to replace it.
 func TestSessionCloseReportsAWaitItCouldNotFinish(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	egress := &slowEgress{release: make(chan struct{})}
-	defer close(egress.release)
 	session, err := ServeSandbox(context.Background(), SandboxNetworkConfig{
 		ActorUID: "close-deadline", EgressPort: testEgressPort,
 	}, egress, nil)
@@ -400,7 +399,19 @@ func TestSessionCloseReportsAWaitItCouldNotFinish(t *testing.T) {
 	if err := session.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Close = %v, want the deadline reported", err)
 	}
-	if _, err := netns.GetFromName(nodepath.ActorNetNSName("close-deadline")); err == nil {
-		t.Error("the namespace survived a Close whose wait timed out")
+	retained, err := netns.GetFromName(nodepath.ActorNetNSName("close-deadline"))
+	if err != nil {
+		t.Error("lost namespace before serving stopped", err)
+	} else {
+		retained.Close()
 	}
+	close(egress.release)
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatal("cleanup retry", err)
+	}
+	if current, err := netns.GetFromName(nodepath.ActorNetNSName("close-deadline")); err == nil {
+		current.Close()
+		t.Fatal("namespace remained after proven cleanup")
+	}
+
 }

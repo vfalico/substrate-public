@@ -40,7 +40,10 @@ type hostedActor struct {
 	attribution resources.ActorAttribution
 
 	// Mutable fields are guarded by actorsMu.
-	network *ateomnet.SandboxSession
+	executionRequirement []byte
+	cleanupPending       bool
+	control              *runtimeControl
+	network              *ateomnet.SandboxSession
 	// Nil until boot publishes the VM.
 	vm *runningActor
 	// Nil when no guest stats connection is available.
@@ -60,6 +63,9 @@ func (s *AteomService) admitActor(attribution resources.ActorAttribution, resume
 	defer s.actorsMu.Unlock()
 	var stale *ateomnet.SandboxSession
 	if old, ok := s.actors[attribution.UID]; ok {
+		if old.cleanupPending {
+			return nil, nil, fmt.Errorf("actor cleanup is pending; exact owner retained")
+		}
 		stale = old.network
 	} else if len(s.actors)+s.draining >= s.maxActors {
 		return nil, nil, apierror.ResourceExhausted("worker is full: %d actors", s.maxActors)
@@ -132,35 +138,36 @@ func (s *AteomService) cleanupSandboxState(ctx context.Context, actorUID string)
 // unhostActor removes an actor, its network, and its cgroup. Repeated calls are
 // safe. The caller must stop the VM first.
 func (s *AteomService) unhostActor(ctx context.Context, actorUID string) error {
+	if err := s.retireExecution(ctx, actorUID); err != nil {
+		return err
+	}
 	s.actorsMu.Lock()
 	hosted, ok := s.actors[actorUID]
-	delete(s.actors, actorUID)
 	if ok {
-		// Retain capacity until network cleanup completes.
-		s.draining++
+		hosted.cleanupPending = true
 	}
 	s.actorsMu.Unlock()
 	if !ok {
 		return nil
 	}
-	defer func() {
-		s.actorsMu.Lock()
-		s.draining--
-		s.actorsMu.Unlock()
-	}()
-
+	// Keep the exact hosted owner and its capacity reservation until ALL local
+	// resources are released. A failed retry cannot replace this incarnation.
 	if s.actorCgroups {
 		if err := ateomcgroup.RemoveActorLeaf(actorUID); err != nil {
-			slog.WarnContext(ctx, "Failed to remove the actor's cgroup", slog.Any("err", err))
+			return fmt.Errorf("retained actor cgroup cleanup: %w", err)
 		}
 	}
-	if hosted.network == nil {
-		return nil
+	if hosted.network != nil {
+		if err := hosted.network.Close(ctx); err != nil {
+			return fmt.Errorf("retained actor network cleanup: %w", err)
+		}
 	}
-	if err := hosted.network.Close(ctx); err != nil {
-		slog.WarnContext(ctx, "Failed to remove the sandbox network", slog.Any("err", err))
-		return err
+	s.actorsMu.Lock()
+	defer s.actorsMu.Unlock()
+	if s.actors[actorUID] != hosted {
+		return fmt.Errorf("cleanup owner replaced unexpectedly")
 	}
+	delete(s.actors, actorUID)
 	return nil
 }
 
@@ -244,6 +251,31 @@ func (s *AteomService) sandboxDialer(actorUID string) atunnel.DialFunc {
 		s.actorsMu.RUnlock()
 		if session == nil {
 			return nil, fmt.Errorf("actor %s is not hosted here", actorUID)
+		}
+		// Every new routed connection revalidates the exact active binding. This
+		// covers pinned warm routes, which intentionally do not call ResumeActor.
+		if err := s.lookupExecution(ctx, actorUID); err != nil {
+			slog.WarnContext(ctx, "exact execution route lookup refused", "error", err)
+			return nil, err
+		}
+		if s.hostedMandatoryExecution(actorUID) {
+			c, err := s.executionClient()
+			if err != nil {
+				return nil, err
+			}
+			if c.Config.GuestPort != 0 {
+				if c.Config.ControlStdioContainer != "" {
+					return s.dialControlStdio(ctx, actorUID, network, address)
+				}
+				if len(c.Config.ControlSourcePorts) == 0 {
+					return nil, fmt.Errorf("guest control transport needs explicit source ports")
+				}
+				conn, err := session.DialerWithTCPSourcePorts(c.Config.ControlSourcePorts)(ctx, network, address)
+				if err != nil {
+					slog.WarnContext(ctx, "explicit control dial refused", "error", err)
+				}
+				return conn, err
+			}
 		}
 		return session.Dialer()(ctx, network, address)
 	}

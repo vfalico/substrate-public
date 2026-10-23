@@ -1617,7 +1617,7 @@ func buildAteomWorkloadSpec(spec *ateletpb.WorkloadSpec) (*ateompb.WorkloadSpec,
 		volumes[name] = vol
 	}
 
-	out := &ateompb.WorkloadSpec{}
+	out := &ateompb.WorkloadSpec{ExecutionRequirement: append([]byte(nil), spec.GetExecutionRequirement()...)}
 	for _, ctr := range spec.GetContainers() {
 		var ddMounts []*ateompb.DurableDirVolumeMount
 		var csiMounts []*ateompb.VolumeMount

@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -163,6 +164,30 @@ func requireAdminPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	containerOnce.Do(func() {
 		ctx := context.Background()
+		// Preserve the authoritative init/Ping error. Diagnostics are best-effort
+		// on this exact container handle, before ordinary Shutdown terminates it.
+		defer func() {
+			if containerErr == nil || containerPG == nil || containerPG.Container == nil {
+				return
+			}
+			logCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			logs, err := containerPG.Logs(logCtx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "PostgreSQL failure logs unavailable: %v\n", err)
+				return
+			}
+			defer logs.Close()
+			// The pinned multiplexed reader is an io.PipeReader: close it on
+			// deadline as well, so a stalled Read cannot outlive logCtx.
+			stopClose := context.AfterFunc(logCtx, func() { _ = logs.Close() })
+			defer stopClose()
+			// Bound bytes independently of the read deadline.
+			_, err = io.Copy(os.Stderr, io.LimitReader(logs, 16*1024))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "PostgreSQL failure log read: %v\n", err)
+			}
+		}()
 		if err := dockerenv.Configure(ctx); err != nil {
 			containerErr = err
 			return
@@ -171,6 +196,7 @@ func requireAdminPool(t *testing.T) *pgxpool.Pool {
 			postgres.WithDatabase("postgres"),
 			postgres.WithUsername("postgres"),
 			postgres.WithPassword("postgres"),
+			postgres.BasicWaitStrategies(),
 		)
 		if containerErr != nil {
 			return

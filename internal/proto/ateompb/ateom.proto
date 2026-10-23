@@ -180,6 +180,9 @@ message EgressGateway {
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.
 message WorkloadSpec {
   repeated Container containers = 1;
+  // Complete opaque Actor execution requirement; never interpreted by routing.
+  bytes execution_requirement = 3;
+
 }
 
 message Container {
