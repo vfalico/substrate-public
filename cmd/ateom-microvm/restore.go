@@ -105,6 +105,14 @@ func newReseedNonce() ([]byte, error) {
 // Contract with atelet: the snapshot's files are in ActorDirs.restore_dir,
 // and the durable-dir volume directories re-created (empty).
 func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (resp *ateompb.RestoreWorkloadResponse, retErr error) {
+	if len(req.GetSpec().GetExecutionRequirement()) != 0 {
+		return nil, fmt.Errorf("governed snapshot restore is not yet supported; no compute resumed")
+	}
+	// An omitted incoming requirement cannot erase a retained governed binding.
+	// Resolve durable ownership before networking, snapshots or guest execution.
+	if err := s.refuseGovernedReuse(req.GetActorUid()); err != nil {
+		return nil, err
+	}
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -118,6 +126,12 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, fmt.Errorf("gave up waiting for the actor's lock: %w", ctx.Err())
 	}
 	defer s.locks.Unlock(req.GetActorUid())
+	// The preflight above is only an early refusal. Recheck durable authority
+	// under the same Actor lock as launch/checkpoint: another RPC could have
+	// committed a governed journal while this request waited for admission.
+	if err := s.refuseGovernedReuse(req.GetActorUid()); err != nil {
+		return nil, err
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -133,15 +147,16 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 
 	p := actorBootParams{
-		actorRef:         resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()},
-		actorUID:         req.GetActorUid(),
-		actorDirs:        req.GetActorDirs(),
-		templateAtespace: req.GetActorTemplateAtespace(),
-		templateName:     req.GetActorTemplateName(),
-		containers:       req.GetSpec().GetContainers(),
-		assetPaths:       req.GetRuntimeAssetPaths(),
-		egressGateway:    req.GetEgressGateway(),
-		size:             sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
+		actorRef:             resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()},
+		actorUID:             req.GetActorUid(),
+		actorDirs:            req.GetActorDirs(),
+		templateAtespace:     req.GetActorTemplateAtespace(),
+		templateName:         req.GetActorTemplateName(),
+		containers:           req.GetSpec().GetContainers(),
+		executionRequirement: append([]byte(nil), req.GetSpec().GetExecutionRequirement()...),
+		assetPaths:           req.GetRuntimeAssetPaths(),
+		egressGateway:        req.GetEgressGateway(),
+		size:                 sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
 	}
 	restoreDir := p.actorDirs.GetRestoreDir()
 	durableDir := p.actorDirs.GetDurableDirVolumeMountsDir()
@@ -370,7 +385,7 @@ func (s *AteomService) restoreMemoryFidelity(ctx context.Context, p actorBootPar
 	// /dev/vda (image) + each /dev/vd{b+i} (actor rootfs) from the snapshot config paths.
 	apiSocket := filepath.Join(kata.VMDir(actorUID), "clh-api-restore.sock")
 	tTap := time.Now()
-	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
+	chCmd, client, err := s.launchActorVMM(ctx, actorUID, ch.LaunchVMMOptions{
 		Binary: rr.chBinary, APISocket: apiSocket, Stdout: slogWriter{ctx}, Stderr: slogWriter{ctx},
 		SysProcAttr: leaf.SysProcAttr(),
 	})
@@ -499,7 +514,7 @@ func (s *AteomService) restoreMemoryFidelity(ctx context.Context, p actorBootPar
 		s.startActorLogForwarding(guestAC, attribution, c.GetName(), c.GetName())
 	}
 
-	if err := s.tunnel.Activate(p.attribution(), s.sandboxDialer(p.actorUID), egress); err != nil {
+	if err := s.tunnel.ActivateChecked(p.attribution(), s.sandboxDialer(p.actorUID), egress, func(ctx context.Context) error { return s.lookupExecution(ctx, p.actorUID) }); err != nil {
 		return err
 	}
 	s.setRunningVM(actorUID, ra)

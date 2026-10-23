@@ -223,6 +223,11 @@ var defaultRPCPermissions = map[string]rpcRule{
 	// GetActorEgressPolicy; ate-controller: worker RPCs) through system roles
 	// in model.fga.
 
+	// Current execution inspection reveals no policy/target contents, but still
+	// requires Actor read authority before the owning worker may be queried.
+	ateapipb.Control_VerifyActorExecution_FullMethodName: rule(checksOf(func(r *ateapipb.VerifyActorExecutionRequest) ([]check, field.ErrorList) {
+		return onActor(RelationCanGet, r.GetActor(), field.NewPath("actor"))
+	})),
 	// Actor lifecycle.
 	ateapipb.Control_PauseActor_FullMethodName: rule(checksOf(func(r *ateapipb.PauseActorRequest) ([]check, field.ErrorList) {
 		return onActor(RelationCanPause, r.GetActor(), field.NewPath("actor"))

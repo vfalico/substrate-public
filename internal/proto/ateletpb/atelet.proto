@@ -238,6 +238,8 @@ message MintActorCertificateResponse {
 // Called by ate-api-server over cluster networking.  ate-api-server
 // authenticates with its k8s pod identity mTLS certificate.
 service AteomHerder {
+  // Read-only exact current enforcement verification; never launch or resume.
+  rpc VerifyExecution(VerifyExecutionRequest) returns (VerifyExecutionResponse) {}
   // Run tells atelet to create a new containerized workload from scratch on an
   // ateom.
   rpc Run(RunRequest) returns (RunResponse) {}
@@ -352,6 +354,8 @@ message SandboxAssets {
 message WorkloadSpec {
   repeated Container containers = 1;
   repeated Volume volumes = 2;
+  bytes execution_requirement = 3;
+
 }
 
 message DurableDirVolume {
@@ -636,3 +640,6 @@ message RestoreRequest {
 
 message RestoreResponse {
 }
+
+message VerifyExecutionRequest { string worker_pod_uid = 1; string atespace = 2; string actor_name = 3; string actor_uid = 4; bytes execution_requirement = 5; }
+message VerifyExecutionResponse { bool active = 1; }

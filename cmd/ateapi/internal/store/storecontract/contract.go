@@ -444,6 +444,46 @@ func runActorContractTests(t *testing.T, setup func(t *testing.T) store.Interfac
 		}
 	})
 
+	t.Run("CreateActorOperation_OriginalResponse", func(t *testing.T) {
+		s := setup(t)
+		owner, ok := s.(store.ActorCreateOperations)
+		if !ok {
+			t.Skip("backend does not implement optional durable create operations")
+		}
+		ctx := t.Context()
+		mustCreateAtespace(t, s, testAtespace)
+		actor := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: "original", Atespace: testAtespace}, Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED}}
+		// Test-only deterministic operation, isolated by setup's fresh store scope.
+		op := "3be0304a-6f7a-4bb3-942a-69778317aebb"
+		hash := []byte("0123456789abcdef0123456789abcdef")
+		first, err := owner.CreateActorOperation(ctx, actor, op, hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lookup, err := owner.LookupActorCreateOperation(ctx, testAtespace, "original", op, hash)
+		if err != nil || !proto.Equal(lookup, first) {
+			t.Fatalf("lookup lost original: %v %v", lookup, err)
+		}
+		again, err := owner.CreateActorOperation(ctx, actor, op, hash)
+		if err != nil || !proto.Equal(first, again) {
+			t.Fatalf("original response changed: %v %v", again, err)
+		}
+		retired, e := owner.RetireActorCreateOperation(ctx, testAtespace, "original", op, hash)
+		if e != nil || !proto.Equal(first, retired) {
+			t.Fatalf("retirement lost original: %v %v", retired, e)
+		}
+		if _, err = owner.CreateActorOperation(ctx, actor, op, hash); !errors.Is(err, store.ErrFailedPrecondition) {
+			t.Fatalf("retired operation admitted retry: %v", err)
+		}
+		if _, err = owner.LookupActorCreateOperation(ctx, testAtespace, "original", op, hash); !errors.Is(err, store.ErrFailedPrecondition) {
+			t.Fatalf("retired operation admitted lookup: %v", err)
+		}
+		hash[0] ^= 1
+		if _, err = owner.CreateActorOperation(ctx, actor, op, hash); !errors.Is(err, store.ErrFailedPrecondition) {
+			t.Fatalf("changed operation input accepted: %v", err)
+		}
+	})
+
 	t.Run("CreateActor_Success", func(t *testing.T) {
 		s := setup(t)
 		ctx := context.Background()

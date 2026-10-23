@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -58,15 +59,17 @@ const (
 
 // Handler routes ingress requests to the worker hosting their actor.
 type Handler struct {
-	resumer *ActorResumer
-	parking *parkingLot
+	identityClient ateapipb.ControlClient
+	resumer        *ActorResumer
+	parking        *parkingLot
 }
 
 func New(apiClient ateapipb.ControlClient, parkCfg ParkedRequestConfig, parkMetrics *ParkingMetrics) *Handler {
 	lot := newParkingLot(parkCfg, parkMetrics)
 	return &Handler{
-		resumer: NewActorResumer(apiClient, withParking(parkCfg), withParkingLot(lot)),
-		parking: lot,
+		identityClient: apiClient,
+		resumer:        NewActorResumer(apiClient, withParking(parkCfg), withParkingLot(lot)),
+		parking:        lot,
 	}
 }
 
@@ -105,10 +108,24 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 		}
 	}
 
-	slog.InfoContext(ctx, "ResumeActor", slog.Any("actor", actorRef))
-	actor, resumeOutcome, err := h.resumer.ResumeActor(ctx, actorRef)
-	if err != nil {
-		return extproc.Result{Resume: string(resumeOutcome)}, mapResumeError(actorRef, err)
+	// Pinned routing is observation-only: never wake a replacement under the
+	// same name. Warm admission belongs to the owning lifecycle, not ingress.
+	expectedUID := routingValue(md, atenet.TargetActorUIDHeader, extproc.TargetActorUIDFilterStateAttribute)
+	var actor *ateapipb.Actor
+	resumeOutcome := ResumeOutcomeNone
+	if expectedUID != "" {
+		if strings.ContainsAny(expectedUID, ", \t\r\n") {
+			return extproc.Result{}, extproc.NewReqError(envoy_type.StatusCode_PreconditionFailed, "invalid actor incarnation")
+		}
+		actor, err = h.identityClient.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name}})
+		if err != nil || actor.GetMetadata().GetUid() != expectedUID || actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RUNNING {
+			return extproc.Result{}, extproc.NewReqError(envoy_type.StatusCode_PreconditionFailed, "actor incarnation unavailable")
+		}
+	} else {
+		actor, resumeOutcome, err = h.resumer.ResumeActor(ctx, actorRef)
+		if err != nil {
+			return extproc.Result{Resume: string(resumeOutcome)}, mapResumeError(actorRef, err)
+		}
 	}
 
 	// ActorTemplate reference, used as low-cardinality route-latency metric
@@ -165,6 +182,15 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 	})
 
+	if expectedUID != "" {
+		mutation.SetHeaders = append(mutation.SetHeaders, &corev3.HeaderValueOption{
+			Header:       &corev3.HeaderValue{Key: atenet.TargetActorUIDHeader, RawValue: []byte(expectedUID)},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		})
+	} else {
+		// Never forward an inner CONNECT header which was not accepted outside.
+		mutation.RemoveHeaders = append(mutation.RemoveHeaders, atenet.TargetActorUIDHeader)
+	}
 	res.Target = targetAddr
 	res.Response = &extprocv3.HeadersResponse{
 		Response: &extprocv3.CommonResponse{

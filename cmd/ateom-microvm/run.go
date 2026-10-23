@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/apierror"
-	"github.com/agent-substrate/substrate/internal/ateomstats"
 
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 
@@ -232,6 +231,15 @@ func (s *AteomService) resolveRuntime(paths map[string]string) resolvedRuntime {
 //   - Each container's bundle holds the overlay spec its rootfs/ is composed
 //     from. ateom builds the OCI spec itself.
 func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
+	// A repeated cold-run request cannot downgrade or reuse a retained
+	// governed incarnation. Cleanup must use TerminateWorkload; a new admitted
+	// Actor receives its own UID. Check before any prior-activation teardown.
+	if err := s.refuseGovernedReuse(req.GetActorUid()); err != nil {
+		return nil, err
+	}
+	if err := s.checkExecutionConfig(req.GetSpec().GetExecutionRequirement()); err != nil {
+		return nil, err
+	}
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -242,6 +250,13 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, fmt.Errorf("gave up waiting for the actor's lock: %w", ctx.Err())
 	}
 	defer s.locks.Unlock(req.GetActorUid())
+	// The preflight above is only an early refusal. Recheck durable authority
+	// under the same Actor lock as launch/checkpoint: another RPC could have
+	// committed a governed journal while this request waited for admission.
+	if err := s.refuseGovernedReuse(req.GetActorUid()); err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// Register for startup cancellation before checking for shutdown.
@@ -251,26 +266,31 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	}
 	defer release()
 
-	if err := s.tunnel.Deactivate(ctx, ateomstats.ActorAttributionFromRequest(req)); err != nil {
-		return nil, err
-	}
-
 	p := actorBootParams{
-		actorRef:         resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()},
-		actorUID:         req.GetActorUid(),
-		actorDirs:        req.GetActorDirs(),
-		templateAtespace: req.GetActorTemplateAtespace(),
-		templateName:     req.GetActorTemplateName(),
-		containers:       req.GetSpec().GetContainers(),
-		assetPaths:       req.GetRuntimeAssetPaths(),
-		egressGateway:    req.GetEgressGateway(),
-		size:             sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
+		actorRef:             resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()},
+		actorUID:             req.GetActorUid(),
+		actorDirs:            req.GetActorDirs(),
+		templateAtespace:     req.GetActorTemplateAtespace(),
+		templateName:         req.GetActorTemplateName(),
+		containers:           req.GetSpec().GetContainers(),
+		executionRequirement: append([]byte(nil), req.GetSpec().GetExecutionRequirement()...),
+		assetPaths:           req.GetRuntimeAssetPaths(),
+		egressGateway:        req.GetEgressGateway(),
+		size:                 sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
 	}
 
 	attribution := p.actorAttribution()
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor starting", attribution)
 
 	if err := s.endPreviousActivation(ctx, attribution.UID, req.GetActorDirs()); err != nil {
+		return nil, err
+	}
+	if err := s.retireExecution(ctx, attribution.UID); err != nil {
+		return nil, fmt.Errorf("prior execution binding needs exact cleanup: %w", err)
+	}
+	// The previous VM is stopped and its exact boundary retired before its
+	// namespace can be removed. Deactivation at RPC entry would race live IO.
+	if err := s.tunnel.Deactivate(ctx, attribution); err != nil {
 		return nil, err
 	}
 	// Publish attribution before boot so stats can include startup usage.
@@ -282,7 +302,13 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 			// Detached: the RPC's context may be what failed it.
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cleanupCancel()
-			_ = s.unhostActor(cleanupCtx, attribution.UID)
+			// A failed guest-side retirement keeps the live bootstrap and exact
+			// inventory for TerminateWorkload retry; never unhost its owner.
+			if s.runningVM(attribution.UID) == nil {
+				if err := s.unhostActor(cleanupCtx, attribution.UID); err != nil {
+					slog.ErrorContext(cleanupCtx, "failed boot cleanup owner retained", slog.Any("err", err))
+				}
+			}
 		}
 	}()
 
@@ -298,13 +324,14 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 // request, or from a Restore request whose snapshot fidelity covers only the
 // durable-dir volumes (the workload itself cold-starts).
 type actorBootParams struct {
-	actorRef         resources.ActorRef
-	actorUID         string
-	actorDirs        *ateompb.ActorDirs
-	templateAtespace string
-	templateName     string
-	containers       []*ateompb.Container
-	assetPaths       map[string]string
+	executionRequirement []byte
+	actorRef             resources.ActorRef
+	actorUID             string
+	actorDirs            *ateompb.ActorDirs
+	templateAtespace     string
+	templateName         string
+	containers           []*ateompb.Container
+	assetPaths           map[string]string
 	// egressGateway is nil unless actor TCP should be redirected through atunnel.
 	egressGateway *ateompb.EgressGateway
 	// size is the actor's declared limits (from the ActorTemplate), supplied on
@@ -357,6 +384,11 @@ const coldBootAttempts = 2
 // Every retry is logged alongside the guest's boot diagnostics, so a guest that
 // dies at boot is never silent.
 func (s *AteomService) coldBootActorRetrying(ctx context.Context, p actorBootParams) error {
+	// Governed retries need a fresh exact incarnation after monotonic retirement.
+	// Refuse automatic in-place boot retry rather than replace its namespace.
+	if len(p.executionRequirement) != 0 {
+		return s.coldBootActor(ctx, p)
+	}
 	for attempt := 1; ; attempt++ {
 		err := s.coldBootActor(ctx, p)
 		if err == nil || attempt >= coldBootAttempts || !errors.Is(err, errGuestStopped) {
@@ -410,11 +442,18 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		if retErr != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			if cleanupErr := s.tunnel.Deactivate(cleanupCtx, p.attribution()); cleanupErr != nil {
-				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Run failure", slog.Any("err", cleanupErr))
+			// Keep namespace and enforcement ownership until compute stop and
+			// exact retirement have succeeded in unhostActor.
+			if len(p.executionRequirement) == 0 {
+				if cleanupErr := s.tunnel.Deactivate(cleanupCtx, p.attribution()); cleanupErr != nil {
+					slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Run failure", slog.Any("err", cleanupErr))
+				}
 			}
 			// Detach any bundle rootfs overlays mounted by buildActorContainers
 			// before the failure, mirroring teardownActor's cleanup.
+			if s.runningVM(actorUID) != nil {
+				return
+			}
 			if err := imagecache.UnmountAllUnder(p.actorDirs.GetOciBundleDir()); err != nil {
 				slog.WarnContext(ctx, "Failed to unmount bundle rootfs overlays after Run failure", slog.Any("err", err))
 			}
@@ -471,6 +510,14 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return err
 	}
 
+	// Validate trusted selection and reserve stdio before booting a VM or
+	// recording guest cleanup ownership. A missing selected container is a pure
+	// preflight refusal, not an attempted RemoveContainer of an unprepared id.
+	controlName, err := s.prepareControlStdio(ctrs, p.executionRequirement)
+	if err != nil {
+		return err
+	}
+
 	// Reject limits the guest can never satisfy, before the containers reach the
 	// agent. Restore does not repeat this: it resumes a snapshotted VM, and the
 	// template spec is immutable, so an actor's limits were validated when its
@@ -499,12 +546,13 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return err
 	}
 	defer leaf.Close()
+	guestCleanupOwned := false
 	vfsdCmd, err := s.stageMergedRootfs(ctx, rr, actorUID, p.actorDirs, ctrs, containers, leaf.SysProcAttr())
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if retErr != nil && vfsdCmd.Process != nil {
+		if retErr != nil && !guestCleanupOwned && vfsdCmd.Process != nil {
 			_ = vfsdCmd.Process.Kill()
 			_, _ = vfsdCmd.Process.Wait()
 		}
@@ -512,7 +560,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 
 	// Launch a bare VMM (CH + api-socket); ateom owns this process for teardown.
 	apiSocket := filepath.Join(kata.VMDir(actorUID), "clh-api.sock")
-	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
+	chCmd, client, err := s.launchActorVMM(ctx, actorUID, ch.LaunchVMMOptions{
 		Binary:      rr.chBinary,
 		APISocket:   apiSocket,
 		Stdout:      slogWriter{ctx},
@@ -523,7 +571,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return fmt.Errorf("while launching VMM: %w", err)
 	}
 	defer func() {
-		if retErr != nil && chCmd.Process != nil {
+		if retErr != nil && !guestCleanupOwned && chCmd.Process != nil {
 			_ = chCmd.Process.Kill()
 			_, _ = chCmd.Process.Wait()
 		}
@@ -560,6 +608,9 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	}
 
 	// Boot.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := client.BootVM(ctx); err != nil {
 		return fmt.Errorf("while booting VM: %w", err)
 	}
@@ -581,24 +632,70 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return fmt.Errorf("while dialing kata-agent: %w", err)
 	}
 	tDialed := time.Now()
-	// The agent client must stay open past this RPC: the stdout/stderr forwarding
-	// goroutines (started below) read over it for the actor's lifetime. It is stored
-	// on the runningActor and closed by teardownActor. Close it here only if Run
-	// fails after this point (no runningActor recorded).
-	defer func() {
-		if retErr != nil {
-			_ = ac.Close()
+	// Publish cleanup ownership BEFORE preparation or an uncertain activation.
+	// This is not readiness and cannot grant dispatch: only the exact activation
+	// acknowledgement below precedes StartContainer. Failed cleanup retains the
+	// live trusted bootstrap, inventory and operation for exact termination retry.
+	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs)}
+	if len(p.executionRequirement) != 0 {
+		guestCleanupOwned = true
+		s.setRunningVM(actorUID, ra)
+		s.actorsMu.Lock()
+		if h := s.actors[actorUID]; h != nil {
+			h.executionRequirement = append([]byte(nil), p.executionRequirement...)
 		}
+		s.actorsMu.Unlock()
+	}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		if !guestCleanupOwned {
+			_ = ac.Close()
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := s.teardownActor(cleanupCtx, actorUID, p.actorDirs, ra, client); err != nil {
+			s.actorsMu.Lock()
+			if h := s.actors[actorUID]; h != nil {
+				h.cleanupPending = true
+			}
+			s.actorsMu.Unlock()
+			slog.ErrorContext(cleanupCtx, "governed failed boot owner retained", slog.Any("err", err))
+			retErr = errors.Join(retErr, fmt.Errorf("failed boot exact cleanup retained: %w", err))
+			return
+		}
+		if err := s.retireExecution(cleanupCtx, actorUID); err != nil {
+			retErr = errors.Join(retErr, err)
+			return
+		}
+		s.setRunningVM(actorUID, nil)
 	}()
 
 	// Post-boot kata-agent setup: sandbox, guest networking, start each container.
-	if err := s.startActorContainers(ctx, ac, actorUID, vsockPath, ctrs); err != nil {
+	if err := s.startActorContainers(ctx, ac, actorUID, vsockPath, ctrs, p.executionRequirement); err != nil {
+		logGuestBootDiagnostics(ctx, actorUID, consoleLog)
+		return err
+	}
+	if err := s.startControlStdio(actorUID, controlName); err != nil {
 		return err
 	}
 	tContainers := time.Now()
 
+	// Capture real first-entrypoint errors even when readiness never succeeds.
+	if len(p.executionRequirement) > 0 {
+		for _, c := range ctrs {
+			if c.name == controlName {
+				go s.actorLogger.WrapContainerLogs(kata.NewStdioReader(context.Background(), ac, c.name, c.name, true), p.attribution(), c.name)
+			} else {
+				s.startActorLogForwarding(ac, p.attribution(), c.name, c.name)
+			}
+		}
+	}
 	// Block until every wakeup-probe-enabled container reports 200.
 	if err := wakeupprobe.WaitAll(ctx, containers, ateomnet.ActorVethIP, wakeupprobe.DialFunc(s.sandboxDialer(actorUID))); err != nil {
+		logGuestBootDiagnostics(ctx, actorUID, consoleLog)
 		return fmt.Errorf("while waiting for container wakeup probe: %w", err)
 	}
 
@@ -611,8 +708,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		slog.Duration("wakeup_probe", time.Since(tContainers)),
 		slog.Duration("since_boot", time.Since(tBooted)))
 
-	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs)}
-	if err := s.tunnel.Activate(p.attribution(), s.sandboxDialer(p.actorUID), egress); err != nil {
+	if err := s.tunnel.ActivateChecked(p.attribution(), s.sandboxDialer(p.actorUID), egress, func(ctx context.Context) error { return s.lookupExecution(ctx, p.actorUID) }); err != nil {
 		return err
 	}
 	s.setRunningVM(actorUID, ra)
@@ -624,7 +720,9 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	workloadIDs := make([]string, 0, len(ctrs))
 	attribution := p.actorAttribution()
 	for _, c := range ctrs {
-		s.startActorLogForwarding(ac, attribution, c.name, c.name)
+		if len(p.executionRequirement) == 0 {
+			s.startActorLogForwarding(ac, attribution, c.name, c.name)
+		}
 		workloadIDs = append(workloadIDs, c.name)
 	}
 
@@ -877,7 +975,7 @@ func buildFsConfigs(id string) []ch.FsConfig {
 // does at boot: establish the sandbox once (mounting the kataShared virtio-fs base),
 // configure guest networking (eth0 IP/MAC/MTU + routes) once, then start each
 // container on its own overlay rootfs. On failure it dumps guest diagnostics.
-func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, ctrs []actorContainer) error {
+func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, ctrs []actorContainer, requirement []byte) error {
 	// Establish the agent sandbox + the kataShared virtio-fs mount (every
 	// container's merged rootfs, durable volumes, CSI volumes, and system-info
 	// volumes). All containers share it, so use the first container's hostname.
@@ -908,9 +1006,60 @@ func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentC
 
 	tNetwork := time.Now()
 
-	for _, c := range ctrs {
-		if err := s.startRootfsContainer(ctx, ac, vsockPath, c); err != nil {
+	if len(requirement) != 0 {
+		owner, err := s.executionClient()
+		if err != nil {
 			return err
+		}
+		if err = owner.PrepareGuest(ctx, id, requirement, vsockPath, "/sys/fs/cgroup/ateomchv", owner.Config.GuestPort, workloadIDs(ctrs)...); err != nil {
+			return fmt.Errorf("persisting pre-create guest owner: %w", err)
+		}
+	}
+	// Governed containers are prepared, never started, before one whole-scope
+	// activation. CreateContainer only runs the trusted Kata/runc initialization;
+	// runtime owns the sole StartContainer dispatch after exact acknowledgement.
+	for _, c := range ctrs {
+		prepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if len(requirement) != 0 {
+			if c.spec.Process == nil || c.spec.Linux == nil {
+				cancel()
+				return fmt.Errorf("incomplete governed container")
+			}
+			c.spec.Process.NoNewPrivileges = true
+			c.spec.Process.Capabilities = &specs.LinuxCapabilities{Bounding: []string{"CAP_NET_BIND_SERVICE"}, Effective: []string{"CAP_NET_BIND_SERVICE"}, Permitted: []string{"CAP_NET_BIND_SERVICE"}}
+		}
+		err := ac.PrepareRootfsContainer(prepCtx, c.name, c.spec)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("preparing workload %q: %w", c.name, err)
+		}
+	}
+	if len(requirement) != 0 {
+		client, err := s.executionClient()
+		if err != nil {
+			return err
+		}
+		if client.Config.GuestPort == 0 {
+			return fmt.Errorf("guest execution boundary requires configured guest port")
+		}
+		if err = client.ActivateGuest(ctx, id, requirement, vsockPath, "/sys/fs/cgroup/ateomchv", client.Config.GuestPort, workloadIDs(ctrs)...); err != nil {
+			return fmt.Errorf("guest activation: %w", err)
+		}
+		s.actorsMu.Lock()
+		if h := s.actors[id]; h != nil {
+			h.executionRequirement = append([]byte(nil), requirement...)
+		}
+		s.actorsMu.Unlock()
+	}
+	for _, c := range ctrs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		startCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := ac.StartContainer(startCtx, c.name)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("starting protected workload %q: %w", c.name, err)
 		}
 	}
 	slog.InfoContext(ctx, "Agent setup phases", slog.String("id", id),
@@ -1038,6 +1187,9 @@ func logGuestBootDiagnostics(ctx context.Context, actorUID, consoleLog string) {
 		{"virtiofsd", virtiofsdLogPath(actorUID)},
 	} {
 		b, err := os.ReadFile(l.path)
+		if len(b) > 0 && os.Getenv("EXECUTION_MICROVM_ROOT") != "" {
+			_ = os.WriteFile(filepath.Join(os.Getenv("EXECUTION_MICROVM_ROOT"), "boot-"+l.name+".log"), b, 0600)
+		}
 		if err != nil || len(b) == 0 {
 			continue
 		}

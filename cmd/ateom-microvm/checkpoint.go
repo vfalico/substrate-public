@@ -32,6 +32,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
 	"github.com/agent-substrate/substrate/internal/ateomphaselog"
 	"github.com/agent-substrate/substrate/internal/ateomstats"
+	"github.com/agent-substrate/substrate/internal/executionpolicy"
 	"github.com/agent-substrate/substrate/internal/imagecache"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"golang.org/x/sync/errgroup"
@@ -66,6 +67,12 @@ import (
 // Allow checkpointing even if the pod is shutting down. This will allow actors
 // (or the harness) to suspend on shutdown.
 func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.CheckpointWorkloadRequest) (_ *ateompb.CheckpointWorkloadResponse, err error) {
+	if len(req.GetSpec().GetExecutionRequirement()) != 0 {
+		return nil, fmt.Errorf("governed checkpoint is not supported; no guest changed")
+	}
+	if err := s.refuseGovernedReuse(req.GetActorUid()); err != nil {
+		return nil, err
+	}
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -76,6 +83,12 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		return nil, fmt.Errorf("gave up waiting for the actor's lock: %w", ctx.Err())
 	}
 	defer s.locks.Unlock(req.GetActorUid())
+	// The preflight above is only an early refusal. Recheck durable authority
+	// under the same Actor lock as launch/checkpoint: another RPC could have
+	// committed a governed journal while this request waited for admission.
+	if err := s.refuseGovernedReuse(req.GetActorUid()); err != nil {
+		return nil, err
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -341,8 +354,78 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, actorDirs *
 	// FAILED_PRECONDITION path ("no numbers right now") instead of surfacing a
 	// closed connection as a failed read.
 	s.setGuestStats(id, nil)
+	s.closeControlStdio(id)
 
 	var errs []error
+	// When the live guest owns enforcement, stop governed containers and retire
+	// their exact binding while the guest still exists. Do not kill the guest
+	// first and then silently discard a cleanup owner.
+	// Durable cleanup is consulted even after a worker process restart, when
+	// no hostedActor/runningActor exists. Mere absence of in-memory ownership
+	// must never kill the guest before the original binding retires.
+	mandatory := s.hostedMandatoryExecution(id)
+	var ec *executionpolicy.Client
+	var record *executionpolicy.GuestRecord
+	if mandatory || os.Getenv("SUBSTRATE_EXECUTION_ENFORCER_CONFIG") != "" {
+		var err error
+		ec, err = s.executionClient()
+		if err != nil {
+			return err
+		}
+		if ec.Config.GuestPort != 0 {
+			record, err = ec.GuestCleanupRecord(id)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			if err == nil {
+				if record.Socket != kata.VsockSocketPath(id) || record.Locator != "/sys/fs/cgroup/ateomchv" || record.Port != ec.Config.GuestPort {
+					return fmt.Errorf("guest cleanup owner locator changed")
+				}
+				// If the VM is still live, prove the exact target before removal
+				// or shutdown. A missing VM is safe only after durable retirement
+				// AND stopped confirmation; unknown/active operations retain owner.
+				if _, err := os.Lstat(record.Socket); err == nil {
+					if err := ec.ValidateGuestCleanup(ctx, record); err != nil {
+						return err
+					}
+				} else if !os.IsNotExist(err) || record.Phase != "retired" || !record.ContainersStopped {
+					return fmt.Errorf("exact guest cleanup target unavailable: %w", err)
+				}
+			}
+		}
+	}
+	if ec != nil && ec.Config.GuestPort != 0 && (mandatory || record != nil) {
+		stopped := record != nil && record.ContainersStopped
+		if !stopped {
+			ac, err := kata.DialAgent(ctx, kata.VsockSocketPath(id))
+			if err != nil {
+				return fmt.Errorf("guest cleanup owner retained: %w", err)
+			}
+			defer ac.Close()
+			var ids []string
+			if record != nil {
+				ids = append(ids, record.Containers...)
+			}
+			if len(ids) == 0 && ra != nil {
+				ids = append(ids, ra.workloadIDs...)
+			}
+			if len(ids) == 0 {
+				return fmt.Errorf("exact governed container inventory unavailable; guest retained")
+			}
+			// Try every exact intended id, including an uncertain Create reply.
+			// No parsing of Kata Internal/absent errors: only authenticated
+			// stable-empty retirement can establish that nothing is still live.
+			if err := retirePreparedGuest(ctx, ids, ac.RemoveContainer,
+				func() error { return ec.RetireGuestKeepOwner(ctx, id) },
+				func() error { return ec.ConfirmGuestContainersStopped(id) }); err != nil {
+				return err
+			}
+		}
+		if err := ec.RetireGuestKeepOwner(ctx, id); err != nil {
+			return err
+		}
+	}
+
 	if client != nil {
 		tShutdown := time.Now()
 		shutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -465,13 +548,15 @@ func (s *AteomService) stopActorVM(ctx context.Context, actorUID string, actorDi
 
 func (s *AteomService) terminateWorkload(ctx context.Context, actor resources.ActorAttribution, actorDirs *ateompb.ActorDirs) error {
 	var errs []error
-	if err := s.tunnel.Deactivate(ctx, actor); err != nil {
-		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
-	}
-
 	actorUID := actor.UID
 	if err := s.stopActorVM(ctx, actorUID, actorDirs); err != nil {
-		errs = append(errs, fmt.Errorf("while tearing down actor: %w", err))
+		return fmt.Errorf("while stopping actor before boundary retirement: %w", err)
+	}
+	if err := s.retireExecution(ctx, actorUID); err != nil {
+		return fmt.Errorf("exact execution cleanup retained: %w", err)
+	}
+	if err := s.tunnel.Deactivate(ctx, actor); err != nil {
+		errs = append(errs, fmt.Errorf("while deactivating stopped actor network: %w", err))
 	}
 	// Remove attribution after teardown; a failed checkpoint may leave the VM running.
 	if err := s.unhostActor(ctx, actorUID); err != nil {

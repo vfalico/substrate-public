@@ -27,6 +27,8 @@ const (
 	// "<atespace>/<actor>". HTTP field names are case-insensitive; this uses its
 	// HTTP/2 wire form so dataplane configuration and metadata are native.
 	TargetActorHeader = "ate-target-actor"
+	// TargetActorUIDHeader is an optional exact-incarnation precondition.
+	TargetActorUIDHeader = "ate-target-actor-uid"
 )
 
 // ParseTargetActor parses and validates a TargetActorHeader value.

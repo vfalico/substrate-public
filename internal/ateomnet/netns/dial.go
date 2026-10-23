@@ -32,6 +32,39 @@ import (
 // Dialer dials TCP or UDP IP literals in ns, pinning a thread only until
 // the socket is created.
 func Dialer(ns Handle) func(context.Context, string, string) (net.Conn, error) {
+	return dialer(ns, nil)
+}
+
+// DialerWithTCPSourcePorts chooses only explicitly configured local ports.
+// This is transport configuration, NOT a policy grant. The independent
+// enforcer must still permit each reply destination in the authored ceiling.
+func DialerWithTCPSourcePorts(ns Handle, ports []uint16) func(context.Context, string, string) (net.Conn, error) {
+	frozen := append([]uint16(nil), ports...)
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if network != "tcp" && network != "tcp4" {
+			return nil, fmt.Errorf("configured control transport requires IPv4 TCP")
+		}
+		if len(frozen) == 0 {
+			return nil, fmt.Errorf("explicit control source ports required")
+		}
+		var err error
+		for _, port := range frozen {
+			if port == 0 {
+				return nil, fmt.Errorf("ephemeral control source port refused")
+			}
+			var conn net.Conn
+			conn, err = dialer(ns, &net.TCPAddr{Port: int(port)})(ctx, network, address)
+			if err == nil {
+				return conn, nil
+			}
+			if !errors.Is(err, syscall.EADDRINUSE) && !errors.Is(err, syscall.EADDRNOTAVAIL) {
+				return nil, err
+			}
+		}
+		return nil, fmt.Errorf("configured control ports exhausted: %w", err)
+	}
+}
+func dialer(ns Handle, local *net.TCPAddr) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -46,7 +79,7 @@ func Dialer(ns Handle) func(context.Context, string, string) (net.Conn, error) {
 			// ControlContext runs once it exists: restore there rather than
 			// holding the thread for the whole connect.
 			socketCreated := false
-			dialer := net.Dialer{ControlContext: func(context.Context, string, string, syscall.RawConn) error {
+			dialer := net.Dialer{LocalAddr: local, ControlContext: func(context.Context, string, string, syscall.RawConn) error {
 				if socketCreated {
 					return errors.New("sandbox dial cannot recreate its socket outside the namespace")
 				}

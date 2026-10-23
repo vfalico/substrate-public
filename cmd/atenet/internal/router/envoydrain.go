@@ -17,8 +17,10 @@ package router
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -44,10 +46,36 @@ type envoyDrainer struct {
 	pollInterval time.Duration
 }
 
+// dialEnvoyAdmin explicitly tries both loopback families for localhost. Some
+// hosts intentionally map localhost only to IPv4 while Envoy binds IPv6-only.
+// Do not interpret that resolver convention as evidence the sidecar exited.
+// Literal addresses and non-localhost names retain the normal dial semantics.
+func dialEnvoyAdmin(ctx context.Context, network, address string) (net.Conn, error) {
+	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || !strings.EqualFold(host, "localhost") {
+		return dialer.DialContext(ctx, network, address)
+	}
+	var failures []error
+	for _, ip := range []string{"::1", "127.0.0.1"} {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+		if err == nil {
+			return conn, nil
+		}
+		failures = append(failures, err)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, errors.Join(failures...)
+}
+
 func newEnvoyDrainer(adminAddr string) *envoyDrainer {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = dialEnvoyAdmin
 	return &envoyDrainer{
 		adminAddr:    adminAddr,
-		client:       &http.Client{Timeout: 2 * time.Second},
+		client:       &http.Client{Timeout: 2 * time.Second, Transport: transport},
 		pollInterval: envoyDrainPollInterval,
 	}
 }

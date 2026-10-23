@@ -221,7 +221,12 @@ func (t *Tunnel) PrepareEgress(ctx context.Context, actor resources.ActorAttribu
 // Activate starts admitting the actor's traffic. Ingress reaches the actor
 // through dial; egress is activated only when it was prepared.
 func (t *Tunnel) Activate(actor resources.ActorAttribution, dial atunnel.DialFunc, egress *ActorEgress) error {
-	if err := t.Ingress.Activate(actor.Ref.Atespace, actor.Ref.Name, actor.UID, dial); err != nil {
+	return t.ActivateChecked(actor, dial, egress, nil)
+}
+
+func (t *Tunnel) ActivateChecked(actor resources.ActorAttribution, dial atunnel.DialFunc, egress *ActorEgress, check func(context.Context) error) error {
+
+	if err := t.Ingress.ActivateChecked(actor.Ref.Atespace, actor.Ref.Name, actor.UID, dial, check); err != nil {
 		return fmt.Errorf("while activating actor ingress: %w", err)
 	}
 	if egress == nil {

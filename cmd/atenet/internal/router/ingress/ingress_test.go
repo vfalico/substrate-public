@@ -42,6 +42,7 @@ import (
 
 type mockClient struct {
 	ateapipb.ControlClient
+	getFn    func(context.Context, *ateapipb.GetActorRequest, ...grpc.CallOption) (*ateapipb.Actor, error)
 	resumeFn func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error)
 }
 
@@ -859,4 +860,8 @@ func TestHandleRequestHeaders_FullLotShedsParkedRequest(t *testing.T) {
 			})
 		})
 	}
+}
+
+func (m *mockClient) GetActor(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
+	return m.getFn(ctx, in, opts...)
 }

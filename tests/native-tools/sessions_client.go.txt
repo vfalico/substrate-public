@@ -1,0 +1,41 @@
+// Owning-compute qualification client. Drives the actual Sessions controller
+// and harnesswire, NOT public Sessions/Control/Kaimahi native acceptance.
+package main
+import(
+ "context";"fmt";"net";"os";"time";"strings"
+ "github.com/agent-primitives/sessions/api"
+ v1 "github.com/agent-primitives/sessions/api/genpb"
+ "github.com/agent-primitives/sessions/controller"
+ "github.com/agent-primitives/sessions/eventlog"
+ "github.com/agent-primitives/sessions/harnesswire"
+ "google.golang.org/grpc"
+ "google.golang.org/grpc/credentials/insecure"
+"google.golang.org/grpc/metadata"
+)
+func main(){if err:=run();err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}}
+func run()error{
+ ctx,cancel:=context.WithTimeout(context.Background(),45*time.Second);defer cancel()
+ var conn *grpc.ClientConn;var err error
+ if target:=os.Getenv("SESSIONS_NATIVE_ROUTER");target!=""{
+  ctx=metadata.AppendToOutgoingContext(ctx,"ate-target-actor","native/tools","ate-target-actor-uid",os.Getenv("SESSIONS_NATIVE_ACTOR_UID"))
+  conn,err=grpc.NewClient(target,grpc.WithTransportCredentials(insecure.NewCredentials()))
+ }else{conn,err=grpc.NewClient("passthrough:///native-harness",grpc.WithTransportCredentials(insecure.NewCredentials()),grpc.WithContextDialer(func(ctx context.Context,_ string)(net.Conn,error){return (&net.Dialer{}).DialContext(ctx,"unix",os.Getenv("SESSIONS_NATIVE_PROXY"))}))}
+ if err!=nil{return err};defer conn.Close()
+
+ h:=harnesswire.NewClientHarness(v1.NewHarnessClient(conn));desc,err:=h.Describe(ctx);if err!=nil{return err}
+ if desc.ID!="toolchat"||desc.Version!="1"{return fmt.Errorf("wrong contained harness descriptor %+v",desc)}
+ log:=eventlog.AsStore(eventlog.New());c,err:=controller.New(log,nil);if err!=nil{return err}
+ if err=c.Exec(ctx,h,[]api.Message{*api.TextMessage("user","allow fetch")},0);err!=nil{return fmt.Errorf("allowed native tool execution: %w",err)}
+ recs,err:=log.Read(1);if err!=nil{return err}
+ models,tools,results:=0,0,0
+ for _,r:=range recs{switch r.Event.Kind{case api.EventModelCall:if r.Event.ModelCall==nil||!r.Event.ModelCall.Native{return fmt.Errorf("model not native")};models++;case api.EventToolCall:if r.Event.ToolCall==nil||!r.Event.ToolCall.Native{return fmt.Errorf("tool not native")};tools++;case api.EventToolResult:results++}}
+ if models!=2||tools!=1||results!=1{return fmt.Errorf("incomplete native journal %d %d %d",models,tools,results)}
+ c2,err:=controller.New(log,nil);if err!=nil{return err};result,err:=c2.Replay(ctx,h);if err!=nil||strings.Join(result,"")!="complete"{return fmt.Errorf("native replay: %+v %v",result,err)}
+ denied:=eventlog.AsStore(eventlog.New());c3,err:=controller.New(denied,nil);if err!=nil{return err}
+ if err=c3.Exec(ctx,h,[]api.Message{*api.TextMessage("user","deny fetch")},0);err==nil{return fmt.Errorf("prohibited tool destination succeeded")}
+ recs,readErr:=denied.Read(1);if readErr!=nil{return readErr};intent:=false
+ for _,r:=range recs{if r.Event.ToolCall!=nil{intent=true};if r.Event.Result!=nil{return fmt.Errorf("prohibited tool produced success receipt")}}
+ if !intent{return fmt.Errorf("deny control never attempted native tool")}
+ fmt.Println("NATIVE_SESSIONS_TOOL_PASS native model and tool journaled; replay no effects; denied native tool attempted and failed")
+ return nil
+}

@@ -439,11 +439,22 @@ func (a *AgentClient) CreateSandboxForActor(ctx context.Context, opts CreateSand
 	})
 }
 
-// StartRootfsContainer creates + starts one container on the shared merged rootfs —
-// the stock kata flow: the agent's setup_bundle binds shared/<cid>/rootfs to
-// /run/kata-containers/<cid>/rootfs and the container runs there. Writable: the
-// host-side overlay upper receives the writes (the guest mounts no overlay itself).
+// StartRootfsContainer preserves the ordinary create-and-start behavior. Callers
+// which must establish mandatory restrictions before the first workload effect
+// use PrepareRootfsContainer followed by StartContainer instead.
 func (a *AgentClient) StartRootfsContainer(ctx context.Context, cid string, spec *specs.Spec) error {
+	if err := a.PrepareRootfsContainer(ctx, cid, spec); err != nil {
+		return err
+	}
+	return a.StartContainer(ctx, cid)
+}
+
+// PrepareRootfsContainer creates a container on the shared merged rootfs without
+// executing its init process. The caller owns the prepared container, including
+// cleanup after cancellation or an uncertain RPC result; this method does not
+// grant release authority. StartContainer remains the explicit execution step.
+// An accepted CreateContainer response is not an enforcement acknowledgement.
+func (a *AgentClient) PrepareRootfsContainer(ctx context.Context, cid string, spec *specs.Spec) error {
 	pbSpec := SpecToAgentPB(spec)
 	pbSpec.Root = &agentpb.Root{Path: GuestSharedRootfs(cid), Readonly: false}
 	// Per-container cgroup under the shared /ateomchv parent, so the guest
@@ -457,9 +468,6 @@ func (a *AgentClient) StartRootfsContainer(ctx context.Context, cid string, spec
 		OCI:         pbSpec,
 	}); err != nil {
 		return fmt.Errorf("creating rootfs container %q: %w", cid, err)
-	}
-	if err := a.StartContainer(ctx, cid); err != nil {
-		return fmt.Errorf("starting rootfs container %q: %w", cid, err)
 	}
 	return nil
 }

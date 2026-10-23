@@ -29,7 +29,8 @@ package extproc
 const (
 	// TargetActorFilterStateKey carries the ingress actor routing target across
 	// Envoy's CONNECT internal-listener hop.
-	TargetActorFilterStateKey = "dev.ate.target.actor"
+	TargetActorFilterStateKey    = "dev.ate.target.actor"
+	TargetActorUIDFilterStateKey = "dev.ate.target.actor.uid"
 	// ConnectAuthorityFilterStateKey carries the outer CONNECT authority across
 	// the same hop. Ingress selects the target port from it; the egress request
 	// legs read the IP:port the actor dialed from it, since the port a rule
@@ -38,6 +39,7 @@ const (
 
 	// TargetActorFilterStateAttribute is the CEL expression ext_proc evaluates
 	// to read the corresponding filter state.
+	TargetActorUIDFilterStateAttribute   = "filter_state['" + TargetActorUIDFilterStateKey + "']"
 	TargetActorFilterStateAttribute      = "filter_state['" + TargetActorFilterStateKey + "']"
 	ConnectAuthorityFilterStateAttribute = "filter_state['" + ConnectAuthorityFilterStateKey + "']"
 

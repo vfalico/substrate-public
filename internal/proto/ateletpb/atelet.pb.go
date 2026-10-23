@@ -1410,11 +1410,12 @@ func (x *SandboxAssets) GetPauseImage() string {
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.
 type WorkloadSpec struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Containers    []*Container           `protobuf:"bytes,1,rep,name=containers,proto3" json:"containers,omitempty"`
-	Volumes       []*Volume              `protobuf:"bytes,2,rep,name=volumes,proto3" json:"volumes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	Containers           []*Container           `protobuf:"bytes,1,rep,name=containers,proto3" json:"containers,omitempty"`
+	Volumes              []*Volume              `protobuf:"bytes,2,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	ExecutionRequirement []byte                 `protobuf:"bytes,3,opt,name=execution_requirement,json=executionRequirement,proto3" json:"execution_requirement,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *WorkloadSpec) Reset() {
@@ -1457,6 +1458,13 @@ func (x *WorkloadSpec) GetContainers() []*Container {
 func (x *WorkloadSpec) GetVolumes() []*Volume {
 	if x != nil {
 		return x.Volumes
+	}
+	return nil
+}
+
+func (x *WorkloadSpec) GetExecutionRequirement() []byte {
+	if x != nil {
+		return x.ExecutionRequirement
 	}
 	return nil
 }
@@ -3246,6 +3254,126 @@ func (*RestoreResponse) Descriptor() ([]byte, []int) {
 	return file_atelet_proto_rawDescGZIP(), []int{46}
 }
 
+type VerifyExecutionRequest struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	WorkerPodUid         string                 `protobuf:"bytes,1,opt,name=worker_pod_uid,json=workerPodUid,proto3" json:"worker_pod_uid,omitempty"`
+	Atespace             string                 `protobuf:"bytes,2,opt,name=atespace,proto3" json:"atespace,omitempty"`
+	ActorName            string                 `protobuf:"bytes,3,opt,name=actor_name,json=actorName,proto3" json:"actor_name,omitempty"`
+	ActorUid             string                 `protobuf:"bytes,4,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	ExecutionRequirement []byte                 `protobuf:"bytes,5,opt,name=execution_requirement,json=executionRequirement,proto3" json:"execution_requirement,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *VerifyExecutionRequest) Reset() {
+	*x = VerifyExecutionRequest{}
+	mi := &file_atelet_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyExecutionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyExecutionRequest) ProtoMessage() {}
+
+func (x *VerifyExecutionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_atelet_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyExecutionRequest.ProtoReflect.Descriptor instead.
+func (*VerifyExecutionRequest) Descriptor() ([]byte, []int) {
+	return file_atelet_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *VerifyExecutionRequest) GetWorkerPodUid() string {
+	if x != nil {
+		return x.WorkerPodUid
+	}
+	return ""
+}
+
+func (x *VerifyExecutionRequest) GetAtespace() string {
+	if x != nil {
+		return x.Atespace
+	}
+	return ""
+}
+
+func (x *VerifyExecutionRequest) GetActorName() string {
+	if x != nil {
+		return x.ActorName
+	}
+	return ""
+}
+
+func (x *VerifyExecutionRequest) GetActorUid() string {
+	if x != nil {
+		return x.ActorUid
+	}
+	return ""
+}
+
+func (x *VerifyExecutionRequest) GetExecutionRequirement() []byte {
+	if x != nil {
+		return x.ExecutionRequirement
+	}
+	return nil
+}
+
+type VerifyExecutionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Active        bool                   `protobuf:"varint,1,opt,name=active,proto3" json:"active,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyExecutionResponse) Reset() {
+	*x = VerifyExecutionResponse{}
+	mi := &file_atelet_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyExecutionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyExecutionResponse) ProtoMessage() {}
+
+func (x *VerifyExecutionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_atelet_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyExecutionResponse.ProtoReflect.Descriptor instead.
+func (*VerifyExecutionResponse) Descriptor() ([]byte, []int) {
+	return file_atelet_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *VerifyExecutionResponse) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
 var File_atelet_proto protoreflect.FileDescriptor
 
 const file_atelet_proto_rawDesc = "" +
@@ -3334,12 +3462,13 @@ const file_atelet_proto_rawDesc = "" +
 	"pauseImage\x1aM\n" +
 	"\vAssetsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12(\n" +
-	"\x05value\x18\x02 \x01(\v2\x12.atelet.ArchAssetsR\x05value:\x028\x01\"k\n" +
+	"\x05value\x18\x02 \x01(\v2\x12.atelet.ArchAssetsR\x05value:\x028\x01\"\xa0\x01\n" +
 	"\fWorkloadSpec\x121\n" +
 	"\n" +
 	"containers\x18\x01 \x03(\v2\x11.atelet.ContainerR\n" +
 	"containers\x12(\n" +
-	"\avolumes\x18\x02 \x03(\v2\x0e.atelet.VolumeR\avolumes\"\x12\n" +
+	"\avolumes\x18\x02 \x03(\v2\x0e.atelet.VolumeR\avolumes\x123\n" +
+	"\x15execution_requirement\x18\x03 \x01(\fR\x14executionRequirement\"\x12\n" +
 	"\x10DurableDirVolume\"\x9b\x03\n" +
 	"\x14ExternalVolumeSource\x12*\n" +
 	"\x11storage_volume_id\x18\x01 \x01(\tR\x0fstorageVolumeId\x12\x1f\n" +
@@ -3464,7 +3593,16 @@ const file_atelet_proto_rawDesc = "" +
 	"\x0esandbox_assets\x18\x10 \x01(\v2\x15.atelet.SandboxAssetsR\rsandboxAssetsB\b\n" +
 	"\x06configB\x11\n" +
 	"\x0f_egress_gateway\"\x11\n" +
-	"\x0fRestoreResponse*\x9a\x01\n" +
+	"\x0fRestoreResponse\"\xcb\x01\n" +
+	"\x16VerifyExecutionRequest\x12$\n" +
+	"\x0eworker_pod_uid\x18\x01 \x01(\tR\fworkerPodUid\x12\x1a\n" +
+	"\batespace\x18\x02 \x01(\tR\batespace\x12\x1d\n" +
+	"\n" +
+	"actor_name\x18\x03 \x01(\tR\tactorName\x12\x1b\n" +
+	"\tactor_uid\x18\x04 \x01(\tR\bactorUid\x123\n" +
+	"\x15execution_requirement\x18\x05 \x01(\fR\x14executionRequirement\"1\n" +
+	"\x17VerifyExecutionResponse\x12\x16\n" +
+	"\x06active\x18\x01 \x01(\bR\x06active*\x9a\x01\n" +
 	"\x12ActorMetadataField\x12$\n" +
 	" ACTOR_METADATA_FIELD_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19ACTOR_METADATA_FIELD_NAME\x10\x01\x12!\n" +
@@ -3482,8 +3620,9 @@ const file_atelet_proto_rawDesc = "" +
 	"\fAteomSupport\x12c\n" +
 	"\x14MintActorCertificate\x12#.atelet.MintActorCertificateRequest\x1a$.atelet.MintActorCertificateResponse\"\x00\x12Q\n" +
 	"\x0eRegisterWorker\x12\x1d.atelet.RegisterWorkerRequest\x1a\x1e.atelet.RegisterWorkerResponse\"\x00\x12`\n" +
-	"\x13RequestActorSuspend\x12\".atelet.RequestActorSuspendRequest\x1a#.atelet.RequestActorSuspendResponse\"\x002\xf3\x02\n" +
-	"\vAteomHerder\x120\n" +
+	"\x13RequestActorSuspend\x12\".atelet.RequestActorSuspendRequest\x1a#.atelet.RequestActorSuspendResponse\"\x002\xc9\x03\n" +
+	"\vAteomHerder\x12T\n" +
+	"\x0fVerifyExecution\x12\x1e.atelet.VerifyExecutionRequest\x1a\x1f.atelet.VerifyExecutionResponse\"\x00\x120\n" +
 	"\x03Run\x12\x12.atelet.RunRequest\x1a\x13.atelet.RunResponse\"\x00\x12E\n" +
 	"\n" +
 	"Checkpoint\x12\x19.atelet.CheckpointRequest\x1a\x1a.atelet.CheckpointResponse\"\x00\x12<\n" +
@@ -3504,7 +3643,7 @@ func file_atelet_proto_rawDescGZIP() []byte {
 }
 
 var file_atelet_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_atelet_proto_msgTypes = make([]protoimpl.MessageInfo, 51)
+var file_atelet_proto_msgTypes = make([]protoimpl.MessageInfo, 53)
 var file_atelet_proto_goTypes = []any{
 	(ActorMetadataField)(0),                 // 0: atelet.ActorMetadataField
 	(CheckpointType)(0),                     // 1: atelet.CheckpointType
@@ -3556,10 +3695,12 @@ var file_atelet_proto_goTypes = []any{
 	(*UploadPausedCheckpointResponse)(nil),  // 47: atelet.UploadPausedCheckpointResponse
 	(*RestoreRequest)(nil),                  // 48: atelet.RestoreRequest
 	(*RestoreResponse)(nil),                 // 49: atelet.RestoreResponse
-	nil,                                     // 50: atelet.ArchAssets.FilesEntry
-	nil,                                     // 51: atelet.SandboxAssets.AssetsEntry
-	nil,                                     // 52: atelet.ExternalVolumeSource.VolumeContextEntry
-	nil,                                     // 53: atelet.ExternalVolumeSource.PublishContextEntry
+	(*VerifyExecutionRequest)(nil),          // 50: atelet.VerifyExecutionRequest
+	(*VerifyExecutionResponse)(nil),         // 51: atelet.VerifyExecutionResponse
+	nil,                                     // 52: atelet.ArchAssets.FilesEntry
+	nil,                                     // 53: atelet.SandboxAssets.AssetsEntry
+	nil,                                     // 54: atelet.ExternalVolumeSource.VolumeContextEntry
+	nil,                                     // 55: atelet.ExternalVolumeSource.PublishContextEntry
 }
 var file_atelet_proto_depIdxs = []int32{
 	7,  // 0: atelet.RegisterWorkerRequest.capacity:type_name -> atelet.WorkerResources
@@ -3573,12 +3714,12 @@ var file_atelet_proto_depIdxs = []int32{
 	22, // 8: atelet.RunRequest.spec:type_name -> atelet.WorkloadSpec
 	21, // 9: atelet.RunRequest.sandbox_assets:type_name -> atelet.SandboxAssets
 	18, // 10: atelet.RunRequest.egress_gateway:type_name -> atelet.EgressGateway
-	50, // 11: atelet.ArchAssets.files:type_name -> atelet.ArchAssets.FilesEntry
-	51, // 12: atelet.SandboxAssets.assets:type_name -> atelet.SandboxAssets.AssetsEntry
+	52, // 11: atelet.ArchAssets.files:type_name -> atelet.ArchAssets.FilesEntry
+	53, // 12: atelet.SandboxAssets.assets:type_name -> atelet.SandboxAssets.AssetsEntry
 	33, // 13: atelet.WorkloadSpec.containers:type_name -> atelet.Container
 	31, // 14: atelet.WorkloadSpec.volumes:type_name -> atelet.Volume
-	52, // 15: atelet.ExternalVolumeSource.volume_context:type_name -> atelet.ExternalVolumeSource.VolumeContextEntry
-	53, // 16: atelet.ExternalVolumeSource.publish_context:type_name -> atelet.ExternalVolumeSource.PublishContextEntry
+	54, // 15: atelet.ExternalVolumeSource.volume_context:type_name -> atelet.ExternalVolumeSource.VolumeContextEntry
+	55, // 16: atelet.ExternalVolumeSource.publish_context:type_name -> atelet.ExternalVolumeSource.PublishContextEntry
 	0,  // 17: atelet.ActorMetadataItem.field:type_name -> atelet.ActorMetadataField
 	26, // 18: atelet.ActorMetadataDataSource.items:type_name -> atelet.ActorMetadataItem
 	27, // 19: atelet.SystemInfoDataSource.actor_metadata:type_name -> atelet.ActorMetadataDataSource
@@ -3613,21 +3754,23 @@ var file_atelet_proto_depIdxs = []int32{
 	13, // 48: atelet.AteomSupport.MintActorCertificate:input_type -> atelet.MintActorCertificateRequest
 	3,  // 49: atelet.AteomSupport.RegisterWorker:input_type -> atelet.RegisterWorkerRequest
 	11, // 50: atelet.AteomSupport.RequestActorSuspend:input_type -> atelet.RequestActorSuspendRequest
-	17, // 51: atelet.AteomHerder.Run:input_type -> atelet.RunRequest
-	44, // 52: atelet.AteomHerder.Checkpoint:input_type -> atelet.CheckpointRequest
-	48, // 53: atelet.AteomHerder.Restore:input_type -> atelet.RestoreRequest
-	46, // 54: atelet.AteomHerder.UploadPausedCheckpoint:input_type -> atelet.UploadPausedCheckpointRequest
-	15, // 55: atelet.AteomHerder.Terminate:input_type -> atelet.TerminateRequest
-	14, // 56: atelet.AteomSupport.MintActorCertificate:output_type -> atelet.MintActorCertificateResponse
-	10, // 57: atelet.AteomSupport.RegisterWorker:output_type -> atelet.RegisterWorkerResponse
-	12, // 58: atelet.AteomSupport.RequestActorSuspend:output_type -> atelet.RequestActorSuspendResponse
-	40, // 59: atelet.AteomHerder.Run:output_type -> atelet.RunResponse
-	45, // 60: atelet.AteomHerder.Checkpoint:output_type -> atelet.CheckpointResponse
-	49, // 61: atelet.AteomHerder.Restore:output_type -> atelet.RestoreResponse
-	47, // 62: atelet.AteomHerder.UploadPausedCheckpoint:output_type -> atelet.UploadPausedCheckpointResponse
-	16, // 63: atelet.AteomHerder.Terminate:output_type -> atelet.TerminateResponse
-	56, // [56:64] is the sub-list for method output_type
-	48, // [48:56] is the sub-list for method input_type
+	50, // 51: atelet.AteomHerder.VerifyExecution:input_type -> atelet.VerifyExecutionRequest
+	17, // 52: atelet.AteomHerder.Run:input_type -> atelet.RunRequest
+	44, // 53: atelet.AteomHerder.Checkpoint:input_type -> atelet.CheckpointRequest
+	48, // 54: atelet.AteomHerder.Restore:input_type -> atelet.RestoreRequest
+	46, // 55: atelet.AteomHerder.UploadPausedCheckpoint:input_type -> atelet.UploadPausedCheckpointRequest
+	15, // 56: atelet.AteomHerder.Terminate:input_type -> atelet.TerminateRequest
+	14, // 57: atelet.AteomSupport.MintActorCertificate:output_type -> atelet.MintActorCertificateResponse
+	10, // 58: atelet.AteomSupport.RegisterWorker:output_type -> atelet.RegisterWorkerResponse
+	12, // 59: atelet.AteomSupport.RequestActorSuspend:output_type -> atelet.RequestActorSuspendResponse
+	51, // 60: atelet.AteomHerder.VerifyExecution:output_type -> atelet.VerifyExecutionResponse
+	40, // 61: atelet.AteomHerder.Run:output_type -> atelet.RunResponse
+	45, // 62: atelet.AteomHerder.Checkpoint:output_type -> atelet.CheckpointResponse
+	49, // 63: atelet.AteomHerder.Restore:output_type -> atelet.RestoreResponse
+	47, // 64: atelet.AteomHerder.UploadPausedCheckpoint:output_type -> atelet.UploadPausedCheckpointResponse
+	16, // 65: atelet.AteomHerder.Terminate:output_type -> atelet.TerminateResponse
+	57, // [57:66] is the sub-list for method output_type
+	48, // [48:57] is the sub-list for method input_type
 	48, // [48:48] is the sub-list for extension type_name
 	48, // [48:48] is the sub-list for extension extendee
 	0,  // [0:48] is the sub-list for field type_name
@@ -3663,7 +3806,7 @@ func file_atelet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_atelet_proto_rawDesc), len(file_atelet_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   51,
+			NumMessages:   53,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

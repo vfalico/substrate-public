@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 
 	"github.com/agent-substrate/substrate/internal/ateomnet/dns"
@@ -278,26 +279,58 @@ func CleanupSandboxNetwork(network *SandboxNetwork) error {
 	if network == nil {
 		return nil
 	}
+	// Remove only names still referring to retained namespace handles. A name
+	// may already be absent on retry, but a same-path replacement is never ours.
+	pairs := []struct {
+		name   string
+		handle netns.Handle
+	}{
+		{nodepath.ActorNetNSName(network.ActorUID), network.RuntimeNetNS},
+		{SandboxGatewayNetNSName(network.ActorUID), network.GatewayNetNS},
+	}
+	for _, pair := range pairs {
+		if err := removeExactNamespace(pair.name, pair.handle); err != nil {
+			return err
+		}
+	}
 	var errs error
-	// Compare before Close sets the handle to -1; microVMs share one descriptor.
 	separateNS := network.GatewayNetNS != network.RuntimeNetNS
 	if network.holdsNetNS() {
-		if err := network.RuntimeNetNS.Close(); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("while closing the sandbox netns: %w", err))
-		}
+		errs = errors.Join(errs, network.RuntimeNetNS.Close())
 	}
 	if separateNS && network.GatewayNetNS > 0 {
-		if err := network.GatewayNetNS.Close(); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("while closing the gateway netns: %w", err))
-		}
+		errs = errors.Join(errs, network.GatewayNetNS.Close())
 	}
-	// Deleting the namespaces takes any veth pair with them.
-	for _, name := range []string{nodepath.ActorNetNSName(network.ActorUID), SandboxGatewayNetNSName(network.ActorUID)} {
-		if err := netns.RemoveNamed(name); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("while deleting netns %s: %w", name, err))
-		}
-	}
+	// Closing an FD is terminal even when the kernel reports an error; do not
+	// later close a reused descriptor. Namespace names have already been retired.
+	network.RuntimeNetNS = -1
+	network.GatewayNetNS = -1
 	return errs
+}
+
+func removeExactNamespace(name string, retained netns.Handle) error {
+	current, err := netns.GetFromName(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer current.Close()
+	if retained <= 0 {
+		return fmt.Errorf("namespace %s exists without retained handle", name)
+	}
+	var want, got unix.Stat_t
+	if err = unix.Fstat(int(retained), &want); err != nil {
+		return err
+	}
+	if err = unix.Fstat(int(current), &got); err != nil {
+		return err
+	}
+	if want.Dev != got.Dev || want.Ino != got.Ino {
+		return fmt.Errorf("namespace %s replaced; exact cleanup refused", name)
+	}
+	return netns.RemoveNamed(name)
 }
 
 // egressServer serves one actor's captured connections. Satisfied by
@@ -339,7 +372,10 @@ func serveSandboxEgress(ctx context.Context, e egressServer, actorUID string, ns
 
 // SandboxSession owns a sandbox's network and serving sockets.
 type SandboxSession struct {
-	Network *SandboxNetwork
+	closeMu        sync.Mutex
+	closing        bool
+	cleanupNetwork *SandboxNetwork
+	Network        *SandboxNetwork
 
 	mu      sync.Mutex
 	dns     *dns.Server
@@ -396,9 +432,16 @@ func ServeSandbox(ctx context.Context, cfg SandboxNetworkConfig, egress egressSe
 // namespaces go either way, since leaving them wedges the next activation.
 // Idempotent, and every step's error is returned.
 func (s *SandboxSession) Close(ctx context.Context) error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
 	s.mu.Lock()
-	dnsServer, sockets, network := s.dns, s.sockets, s.Network
-	s.dns, s.sockets, s.Network = nil, nil, nil
+	s.closing = true
+	dnsServer, sockets := s.dns, s.sockets
+	s.dns, s.sockets = nil, nil
+	if s.cleanupNetwork == nil {
+		s.cleanupNetwork = s.Network
+	}
+	network := s.cleanupNetwork
 	s.mu.Unlock()
 
 	var errs error
@@ -422,8 +465,18 @@ func (s *SandboxSession) Close(ctx context.Context) error {
 		errs = errors.Join(errs, fmt.Errorf("while waiting for the sandbox's serving goroutines: %w", ctx.Err()))
 	}
 
+	// Do not destroy namespaces while serving goroutines may still reference them.
+	if ctx.Err() != nil {
+		return errors.Join(errs, ctx.Err())
+	}
 	if network != nil {
 		errs = errors.Join(errs, CleanupSandboxNetwork(network))
+	}
+	if errs == nil {
+		s.mu.Lock()
+		s.Network = nil
+		s.cleanupNetwork = nil
+		s.mu.Unlock()
 	}
 	return errs
 }
@@ -459,13 +512,16 @@ func (h *SessionHolder) Session() *SandboxSession {
 // Close releases the held session, if any.
 func (h *SessionHolder) Close(ctx context.Context) error {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	session := h.session
-	h.session = nil
-	h.mu.Unlock()
 	if session == nil {
 		return nil
 	}
-	return session.Close(ctx)
+	if err := session.Close(ctx); err != nil {
+		return err
+	}
+	h.session = nil
+	return nil
 }
 
 // Dialer reaches whichever sandbox is held when the dial happens.
@@ -482,9 +538,15 @@ func (h *SessionHolder) Dialer() func(context.Context, string, string) (net.Conn
 // Dialer reaches the sandbox from the gateway namespace, the only place its
 // address is routable.
 func (s *SandboxSession) Dialer() func(context.Context, string, string) (net.Conn, error) {
+	return s.dialer(nil)
+}
+func (s *SandboxSession) DialerWithTCPSourcePorts(ports []uint16) func(context.Context, string, string) (net.Conn, error) {
+	return s.dialer(append([]uint16(nil), ports...))
+}
+func (s *SandboxSession) dialer(ports []uint16) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		s.mu.Lock()
-		if s.Network == nil {
+		if s.Network == nil || s.closing {
 			s.mu.Unlock()
 			return nil, net.ErrClosed
 		}
@@ -495,6 +557,9 @@ func (s *SandboxSession) Dialer() func(context.Context, string, string) (net.Con
 		}
 		ns := netns.Handle(fd)
 		defer ns.Close()
+		if ports != nil {
+			return netns.DialerWithTCPSourcePorts(ns, ports)(ctx, network, address)
+		}
 		return netns.Dialer(ns)(ctx, network, address)
 	}
 }

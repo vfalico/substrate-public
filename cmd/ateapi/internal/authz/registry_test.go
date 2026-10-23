@@ -37,6 +37,7 @@ func TestDefaultRPCPermissions(t *testing.T) {
 		req        any
 		want       []check
 	}{
+		{name: "VerifyActorExecution", fullMethod: ateapipb.Control_VerifyActorExecution_FullMethodName, req: &ateapipb.VerifyActorExecutionRequest{Actor: actorRef, ActorUid: "exact", ExecutionRequirement: []byte("opaque")}, want: []check{{RelationCanGet, "actor:team-a/runner"}}},
 		// Atespaces.
 		{
 			name:       "CreateAtespace",

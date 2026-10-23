@@ -33,6 +33,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	Control_VerifyActorExecution_FullMethodName       = "/ateapi.Control/VerifyActorExecution"
 	Control_GetActor_FullMethodName                   = "/ateapi.Control/GetActor"
 	Control_CreateActor_FullMethodName                = "/ateapi.Control/CreateActor"
 	Control_UpdateActor_FullMethodName                = "/ateapi.Control/UpdateActor"
@@ -83,6 +84,8 @@ const (
 //
 // Control is the primary RPC interface for Agentic Substrate.
 type ControlClient interface {
+	// Read-only exact current enforcement verification; never launch or resume.
+	VerifyActorExecution(ctx context.Context, in *VerifyActorExecutionRequest, opts ...grpc.CallOption) (*VerifyActorExecutionResponse, error)
 	// Get an Actor.
 	GetActor(ctx context.Context, in *GetActorRequest, opts ...grpc.CallOption) (*Actor, error)
 	// Create a new Actor deriving from a given ActorTemplate.
@@ -197,6 +200,16 @@ type controlClient struct {
 
 func NewControlClient(cc grpc.ClientConnInterface) ControlClient {
 	return &controlClient{cc}
+}
+
+func (c *controlClient) VerifyActorExecution(ctx context.Context, in *VerifyActorExecutionRequest, opts ...grpc.CallOption) (*VerifyActorExecutionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyActorExecutionResponse)
+	err := c.cc.Invoke(ctx, Control_VerifyActorExecution_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *controlClient) GetActor(ctx context.Context, in *GetActorRequest, opts ...grpc.CallOption) (*Actor, error) {
@@ -625,6 +638,8 @@ func (c *controlClient) DeleteAtespaceAccessPolicy(ctx context.Context, in *Dele
 //
 // Control is the primary RPC interface for Agentic Substrate.
 type ControlServer interface {
+	// Read-only exact current enforcement verification; never launch or resume.
+	VerifyActorExecution(context.Context, *VerifyActorExecutionRequest) (*VerifyActorExecutionResponse, error)
 	// Get an Actor.
 	GetActor(context.Context, *GetActorRequest) (*Actor, error)
 	// Create a new Actor deriving from a given ActorTemplate.
@@ -741,6 +756,9 @@ type ControlServer interface {
 // pointer dereference when methods are called.
 type UnimplementedControlServer struct{}
 
+func (UnimplementedControlServer) VerifyActorExecution(context.Context, *VerifyActorExecutionRequest) (*VerifyActorExecutionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyActorExecution not implemented")
+}
 func (UnimplementedControlServer) GetActor(context.Context, *GetActorRequest) (*Actor, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetActor not implemented")
 }
@@ -886,6 +904,24 @@ func RegisterControlServer(s grpc.ServiceRegistrar, srv ControlServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&Control_ServiceDesc, srv)
+}
+
+func _Control_VerifyActorExecution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyActorExecutionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).VerifyActorExecution(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_VerifyActorExecution_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).VerifyActorExecution(ctx, req.(*VerifyActorExecutionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _Control_GetActor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -1651,6 +1687,10 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "ateapi.Control",
 	HandlerType: (*ControlServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "VerifyActorExecution",
+			Handler:    _Control_VerifyActorExecution_Handler,
+		},
 		{
 			MethodName: "GetActor",
 			Handler:    _Control_GetActor_Handler,

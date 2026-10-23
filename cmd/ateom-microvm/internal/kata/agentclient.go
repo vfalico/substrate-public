@@ -333,3 +333,12 @@ func (r *StreamReader) Read(p []byte) (int, error) {
 	n := copy(p, data)
 	return n, nil
 }
+
+// RemoveContainer confirms Kata has stopped the entire workload container.
+func (a *AgentClient) RemoveContainer(ctx context.Context, containerID string) error {
+	req := &agentpb.RemoveContainerRequest{ContainerId: containerID, Timeout: 20}
+	if err := a.client.Call(ctx, "grpc.AgentService", "RemoveContainer", req, &emptypb.Empty{}); err != nil {
+		return fmt.Errorf("agent RemoveContainer: %w", err)
+	}
+	return nil
+}

@@ -32,6 +32,8 @@ option go_package = "github.com/agent-substrate/substrate/internal/proto/ateompb
 // running workload (with CheckpointWorkload).  This moves the ateom back to
 // "free" state.
 service Ateom {
+  // Read-only exact current enforcement verification; never launch or resume.
+  rpc VerifyExecution(VerifyExecutionRequest) returns (VerifyExecutionResponse) {}
   // RunWorkload tells ateom to begin running a new workload (one or more
   // containers, potentially with shared filesystems).
   rpc RunWorkload(RunWorkloadRequest) returns (RunWorkloadResponse) {}
@@ -179,6 +181,8 @@ message EgressGateway {
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.
 message WorkloadSpec {
   repeated Container containers = 1;
+  bytes execution_requirement = 3;
+
 }
 
 message Container {
@@ -493,3 +497,6 @@ message GetActiveWorkloadStatsResponse {
   // assume that.
   repeated WorkloadStatsSample samples = 1;
 }
+
+message VerifyExecutionRequest { string atespace = 1; string actor_name = 2; string actor_uid = 3; bytes execution_requirement = 4; }
+message VerifyExecutionResponse { bool active = 1; }

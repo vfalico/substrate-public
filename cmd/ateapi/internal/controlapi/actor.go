@@ -17,6 +17,7 @@ package controlapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/substratex509"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
@@ -70,13 +72,86 @@ func (s *RPCService) CreateActor(ctx context.Context, req *ateapipb.CreateActorR
 	setSpanActorRefAttributes(ctx, resources.ActorRefFromActor(inActor))
 
 	// Handle the creation, including validation of the final stored object.
-	stored, err := s.impl.CreateActor(ctx, inActor)
+	var stored *ateapipb.Actor
+	if req.GetOperationId() == "" {
+		if req.GetLookupOnly() || req.GetRetireOperation() {
+			return nil, apierror.InvalidArgument("lookup_only requires operation_id")
+		}
+		stored, err = s.impl.CreateActor(ctx, inActor)
+	} else {
+		if req.GetLookupOnly() && req.GetRetireOperation() {
+			return nil, apierror.InvalidArgument("lookup_only and retire_operation are mutually exclusive")
+		}
+		id, parseErr := uuid.Parse(req.GetOperationId())
+		if parseErr != nil || id.String() != req.GetOperationId() {
+			return nil, apierror.InvalidArgument("operation_id must be a canonical UUID")
+		}
+		raw, marshalErr := (proto.MarshalOptions{Deterministic: true}).Marshal(inActor)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		digest := sha256.Sum256(raw)
+		owner, ok := s.impl.(interface {
+			createActorOperation(context.Context, *ateapipb.Actor, string, []byte, bool, bool) (*ateapipb.Actor, error)
+		})
+		if !ok {
+			return nil, apierror.FailedPrecondition("service lacks durable Actor create operations")
+		}
+		stored, err = owner.createActorOperation(ctx, inActor, req.GetOperationId(), digest[:], req.GetLookupOnly(), req.GetRetireOperation())
+	}
 	setSpanActorAttributes(ctx, stored)
 
 	return stored, err
 }
 
 func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) (*ateapipb.Actor, error) {
+	return s.createActorOperation(ctx, inActor, "", nil, false, false)
+}
+
+// Idempotence is owned by the existing compute persistence boundary, not a
+// policy service. All ordinary template validation still precedes first create.
+func (s *ServiceImpl) createActorOperation(ctx context.Context, inActor *ateapipb.Actor, operationID string, requestHash []byte, lookupOnly, retireOnly bool) (*ateapipb.Actor, error) {
+	if operationID != "" {
+		owner, ok := s.store.(store.ActorCreateOperations)
+		if !ok {
+			return nil, apierror.FailedPrecondition("persistence lacks durable Actor create operations")
+		}
+		if retireOnly {
+			// Serialize the retirement barrier with native resume/delete using the
+			// existing owner lease. Persistence atomically marks original compute
+			// DELETING alongside the irreversible operation tombstone.
+			ref := resources.ActorRefFromActor(inActor)
+			leaseCtx, lease, e := acquireLease(ctx, s.store, actorLeaseKey(ref), "actor")
+			if e != nil {
+				return nil, e
+			}
+			defer lease.Close()
+			original, e := owner.RetireActorCreateOperation(leaseCtx, inActor.GetMetadata().GetAtespace(), inActor.GetMetadata().GetName(), operationID, requestHash)
+			if errors.Is(e, store.ErrFailedPrecondition) {
+				return nil, apierror.FailedPrecondition("create operation retirement identity differs")
+			}
+			if e != nil {
+				return nil, e
+			}
+			if original == nil {
+				return &ateapipb.Actor{}, nil
+			}
+			return original, nil
+		}
+		original, e := owner.LookupActorCreateOperation(ctx, inActor.GetMetadata().GetAtespace(), inActor.GetMetadata().GetName(), operationID, requestHash)
+		if e == nil {
+			return original, nil
+		}
+		if errors.Is(e, store.ErrFailedPrecondition) {
+			return nil, apierror.FailedPrecondition("original create operation target, namespace generation or input differs")
+		}
+		if !errors.Is(e, store.ErrNotFound) {
+			return nil, e
+		}
+		if lookupOnly {
+			return nil, apierror.NotFound("Actor create operation not found")
+		}
+	}
 	// Check that the referenced ActorTemplate exists.
 	// FIXME: This is not atomic and it is not a guarantee that the template
 	// will still exist later.  Checking it here produces a nice error UX, but
@@ -147,13 +222,25 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 	}
 
 	// Save the data in the storage layer.
-	stored, err := s.store.CreateActor(ctx, outActor)
+	var stored *ateapipb.Actor
+	if operationID == "" {
+		stored, err = s.store.CreateActor(ctx, outActor)
+	} else {
+		owner, ok := s.store.(store.ActorCreateOperations)
+		if !ok {
+			return nil, apierror.FailedPrecondition("persistence lacks durable Actor create operations")
+		}
+		stored, err = owner.CreateActorOperation(ctx, outActor, operationID, requestHash)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			return nil, apierror.AlreadyExists("Actor %s already exists", name)
 		}
 		if errors.Is(err, store.ErrFailedPrecondition) {
-			return nil, apierror.FailedPrecondition("Atespace %s not found", atespace)
+			if operationID == "" {
+				return nil, apierror.FailedPrecondition("Atespace %s not found", atespace)
+			}
+			return nil, apierror.FailedPrecondition("Atespace %s missing or create operation input changed", atespace)
 		}
 		return nil, fmt.Errorf("while recording actor: %w", err)
 	}
@@ -280,6 +367,9 @@ func (s *ServiceImpl) UpdateActor(ctx context.Context, actorRef resources.ActorR
 			return err
 		}
 		newVal := toUpdate
+		if string(oldVal.GetExecutionRequirement()) != string(newVal.GetExecutionRequirement()) {
+			return apierror.FailedPrecondition("execution requirement is immutable after Actor creation")
+		}
 
 		// Validate the user's input before doing any further work.
 		if errs := apivalidation.ValidateActorUpdate(ctx, field.NewPath("actor"), newVal, oldVal, false); len(errs) > 0 {
@@ -485,7 +575,7 @@ func (s *RPCService) ResumeActor(ctx context.Context, req *ateapipb.ResumeActorR
 	actorRef := resources.ActorRefFromObjectRef(req.GetActor())
 	setSpanActorRefAttributes(ctx, actorRef)
 
-	actor, resumed, err := s.actorWorkflow.ResumeActor(ctx, actorRef)
+	actor, resumed, err := s.actorWorkflow.ResumeActorExact(ctx, actorRef, req.GetActorUid())
 	if err != nil {
 		if errors.Is(err, store.ErrVersionConflict) {
 			return nil, apierror.Aborted("concurrent update conflict, please retry")

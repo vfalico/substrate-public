@@ -251,6 +251,7 @@ var AteomSupport_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	AteomHerder_VerifyExecution_FullMethodName        = "/atelet.AteomHerder/VerifyExecution"
 	AteomHerder_Run_FullMethodName                    = "/atelet.AteomHerder/Run"
 	AteomHerder_Checkpoint_FullMethodName             = "/atelet.AteomHerder/Checkpoint"
 	AteomHerder_Restore_FullMethodName                = "/atelet.AteomHerder/Restore"
@@ -267,6 +268,8 @@ const (
 // Called by ate-api-server over cluster networking.  ate-api-server
 // authenticates with its k8s pod identity mTLS certificate.
 type AteomHerderClient interface {
+	// Read-only exact current enforcement verification; never launch or resume.
+	VerifyExecution(ctx context.Context, in *VerifyExecutionRequest, opts ...grpc.CallOption) (*VerifyExecutionResponse, error)
 	// Run tells atelet to create a new containerized workload from scratch on an
 	// ateom.
 	Run(ctx context.Context, in *RunRequest, opts ...grpc.CallOption) (*RunResponse, error)
@@ -292,6 +295,16 @@ type ateomHerderClient struct {
 
 func NewAteomHerderClient(cc grpc.ClientConnInterface) AteomHerderClient {
 	return &ateomHerderClient{cc}
+}
+
+func (c *ateomHerderClient) VerifyExecution(ctx context.Context, in *VerifyExecutionRequest, opts ...grpc.CallOption) (*VerifyExecutionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyExecutionResponse)
+	err := c.cc.Invoke(ctx, AteomHerder_VerifyExecution_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *ateomHerderClient) Run(ctx context.Context, in *RunRequest, opts ...grpc.CallOption) (*RunResponse, error) {
@@ -353,6 +366,8 @@ func (c *ateomHerderClient) Terminate(ctx context.Context, in *TerminateRequest,
 // Called by ate-api-server over cluster networking.  ate-api-server
 // authenticates with its k8s pod identity mTLS certificate.
 type AteomHerderServer interface {
+	// Read-only exact current enforcement verification; never launch or resume.
+	VerifyExecution(context.Context, *VerifyExecutionRequest) (*VerifyExecutionResponse, error)
 	// Run tells atelet to create a new containerized workload from scratch on an
 	// ateom.
 	Run(context.Context, *RunRequest) (*RunResponse, error)
@@ -380,6 +395,9 @@ type AteomHerderServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAteomHerderServer struct{}
 
+func (UnimplementedAteomHerderServer) VerifyExecution(context.Context, *VerifyExecutionRequest) (*VerifyExecutionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyExecution not implemented")
+}
 func (UnimplementedAteomHerderServer) Run(context.Context, *RunRequest) (*RunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Run not implemented")
 }
@@ -414,6 +432,24 @@ func RegisterAteomHerderServer(s grpc.ServiceRegistrar, srv AteomHerderServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&AteomHerder_ServiceDesc, srv)
+}
+
+func _AteomHerder_VerifyExecution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyExecutionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomHerderServer).VerifyExecution(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AteomHerder_VerifyExecution_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomHerderServer).VerifyExecution(ctx, req.(*VerifyExecutionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _AteomHerder_Run_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -513,6 +549,10 @@ var AteomHerder_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "atelet.AteomHerder",
 	HandlerType: (*AteomHerderServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "VerifyExecution",
+			Handler:    _AteomHerder_VerifyExecution_Handler,
+		},
 		{
 			MethodName: "Run",
 			Handler:    _AteomHerder_Run_Handler,

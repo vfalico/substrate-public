@@ -33,6 +33,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	Ateom_VerifyExecution_FullMethodName        = "/ateom.Ateom/VerifyExecution"
 	Ateom_RunWorkload_FullMethodName            = "/ateom.Ateom/RunWorkload"
 	Ateom_CheckpointWorkload_FullMethodName     = "/ateom.Ateom/CheckpointWorkload"
 	Ateom_RestoreWorkload_FullMethodName        = "/ateom.Ateom/RestoreWorkload"
@@ -59,6 +60,8 @@ const (
 // running workload (with CheckpointWorkload).  This moves the ateom back to
 // "free" state.
 type AteomClient interface {
+	// Read-only exact current enforcement verification; never launch or resume.
+	VerifyExecution(ctx context.Context, in *VerifyExecutionRequest, opts ...grpc.CallOption) (*VerifyExecutionResponse, error)
 	// RunWorkload tells ateom to begin running a new workload (one or more
 	// containers, potentially with shared filesystems).
 	RunWorkload(ctx context.Context, in *RunWorkloadRequest, opts ...grpc.CallOption) (*RunWorkloadResponse, error)
@@ -133,6 +136,16 @@ type ateomClient struct {
 
 func NewAteomClient(cc grpc.ClientConnInterface) AteomClient {
 	return &ateomClient{cc}
+}
+
+func (c *ateomClient) VerifyExecution(ctx context.Context, in *VerifyExecutionRequest, opts ...grpc.CallOption) (*VerifyExecutionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyExecutionResponse)
+	err := c.cc.Invoke(ctx, Ateom_VerifyExecution_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *ateomClient) RunWorkload(ctx context.Context, in *RunWorkloadRequest, opts ...grpc.CallOption) (*RunWorkloadResponse, error) {
@@ -213,6 +226,8 @@ func (c *ateomClient) TerminateWorkload(ctx context.Context, in *TerminateWorklo
 // running workload (with CheckpointWorkload).  This moves the ateom back to
 // "free" state.
 type AteomServer interface {
+	// Read-only exact current enforcement verification; never launch or resume.
+	VerifyExecution(context.Context, *VerifyExecutionRequest) (*VerifyExecutionResponse, error)
 	// RunWorkload tells ateom to begin running a new workload (one or more
 	// containers, potentially with shared filesystems).
 	RunWorkload(context.Context, *RunWorkloadRequest) (*RunWorkloadResponse, error)
@@ -289,6 +304,9 @@ type AteomServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAteomServer struct{}
 
+func (UnimplementedAteomServer) VerifyExecution(context.Context, *VerifyExecutionRequest) (*VerifyExecutionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyExecution not implemented")
+}
 func (UnimplementedAteomServer) RunWorkload(context.Context, *RunWorkloadRequest) (*RunWorkloadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RunWorkload not implemented")
 }
@@ -326,6 +344,24 @@ func RegisterAteomServer(s grpc.ServiceRegistrar, srv AteomServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&Ateom_ServiceDesc, srv)
+}
+
+func _Ateom_VerifyExecution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyExecutionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomServer).VerifyExecution(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Ateom_VerifyExecution_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomServer).VerifyExecution(ctx, req.(*VerifyExecutionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _Ateom_RunWorkload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -443,6 +479,10 @@ var Ateom_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "ateom.Ateom",
 	HandlerType: (*AteomServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "VerifyExecution",
+			Handler:    _Ateom_VerifyExecution_Handler,
+		},
 		{
 			MethodName: "RunWorkload",
 			Handler:    _Ateom_RunWorkload_Handler,

@@ -953,6 +953,7 @@ func actorRoutingFilterStateFilter(captureAuthority bool) *hcmv3.HttpFilter {
 	values := make([]*setfilterstatecommonv3.FilterStateValue, 0, 2)
 	routingFields := []struct{ key, format string }{
 		{extproc.TargetActorFilterStateKey, "%CEL(request.headers['" + atenet.TargetActorHeader + "'])%"},
+		{extproc.TargetActorUIDFilterStateKey, "%CEL(request.headers['" + atenet.TargetActorUIDHeader + "'])%"},
 	}
 	if captureAuthority {
 		routingFields = append(routingFields, struct{ key, format string }{
@@ -1095,6 +1096,7 @@ func (x *XdsServer) buildHcm(statPrefix string, captureActorRouting bool) *anypb
 		},
 		RequestAttributes: []string{
 			extproc.TargetActorFilterStateAttribute,
+			extproc.TargetActorUIDFilterStateAttribute,
 			extproc.ConnectAuthorityFilterStateAttribute,
 		},
 		MetadataOptions: &extprocv3filter.MetadataOptions{
