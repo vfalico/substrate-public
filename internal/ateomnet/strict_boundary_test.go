@@ -14,7 +14,7 @@ import (
 )
 
 // Feasibility probe of the unmodified backend; not an enforcement acceptance test.
-func TestT807BoundaryBaseline(t *testing.T) {
+func TestPOCBoundaryBaseline(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Fatal("must run privileged; a skip is not evidence")
 	}

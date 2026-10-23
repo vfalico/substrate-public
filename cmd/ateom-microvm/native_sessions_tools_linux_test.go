@@ -285,7 +285,7 @@ lock=threading.Lock()
 class Handler(http.server.BaseHTTPRequestHandler):
  def handle(self):
   first=self.request.recv(24,socket.MSG_PEEK)
-  if first.startswith(b'T807RAW'):
+  if first.startswith(b'POCRAW'):
    data=self.request.recv(100)
    with lock:counts['allow' if self.server.server_port==28296 else 'deny']+=1
    print('RAW_NATIVE_RECEIVER',self.server.server_port,repr(data),flush=True,file=sys.stderr)
@@ -306,7 +306,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     if not tool:print('NO_NATIVE_SHELL_TOOL',raw,flush=True);return
     command='/bin/busybox wget -qO- http://169.254.17.1:28292/tool; /bin/busybox wget -T 2 -qO- http://169.254.17.1:28293/denied; echo NATIVE_PROBE_DONE'
     if os.environ.get('EXECUTION_CURRENT_SEPARATE')=='1':command=command.replace(':28292/tool',':28296/tool').replace('wget -qO-', 'wget -T 2 -qO-')
-    if os.environ.get('EXECUTION_CURRENT_RAW_TCP')=='1':command="printf T807RAW | /bin/busybox nc -w 2 169.254.17.1 28296; printf T807RAW | /bin/busybox nc -w 2 169.254.17.1 28293; echo NATIVE_PROBE_DONE"
+    if os.environ.get('EXECUTION_CURRENT_RAW_TCP')=='1':command="printf POCRAW | /bin/busybox nc -w 2 169.254.17.1 28296; printf POCRAW | /bin/busybox nc -w 2 169.254.17.1 28293; echo NATIVE_PROBE_DONE"
     if os.environ.get('EXECUTION_KAGENT_NATIVE_SCENARIO')=='deny':command='/bin/busybox wget -T 2 -qO- http://169.254.17.1:28293/denied; echo NATIVE_PROBE_DONE'
     args={'command':command,'timeout_ms':6000} if tool['name']=='shell_command' else ({'cmd':command,'yield_time_ms':10000,'max_output_tokens':2000} if tool['name']=='exec_command' else {'command':['/bin/sh','-c',command],'timeout_ms':6000})
     item={'type':'function_call','id':'native-call-'+str(counts['model']),'call_id':'native-network-'+str(counts['model']),'name':tool['name'],'arguments':json.dumps(args)}
@@ -373,7 +373,7 @@ if os.environ.get('EXECUTION_CURRENT_OVERLAP')=='1':
   b=socketserver.ThreadingUnixStreamServer(os.path.join(os.environ['EXECUTION_MICROVM_ROOT'],'bridge-'+str(port)),Bridge);b.port=port;servers.append(b);threading.Thread(target=b.serve_forever,daemon=True).start()
 if os.environ.get('EXECUTION_CURRENT_RAW_TCP')=='1':
  for port in [28296,28293]:
-  c=socket.create_connection(('169.254.17.1',port),2);c.sendall(b'T807RAW');reply=c.recv(100);c.close()
+  c=socket.create_connection(('169.254.17.1',port),2);c.sendall(b'POCRAW');reply=c.recv(100);c.close()
   if reply!=b'tool-native-ok\n':raise RuntimeError('raw unrestricted control failed')
   print('RAW_UNRESTRICTED_CONTROL_ACK',port,flush=True,file=sys.stderr)
  with lock:counts['allow']=0;counts['deny']=0
